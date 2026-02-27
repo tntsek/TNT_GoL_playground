@@ -440,11 +440,14 @@ class LifeApp:
         y += bh + gap
         self.btn_invert = Button((px, y, pw, bh), "Invert Grid", BTN_BG, BTN_HOVER)
         y += bh + gap
+
+        # Reset button — positioned here but only shown when generation > 0
+        self._reset_btn_y = y
         self.btn_reset = Button((px, y, pw, bh), "Reset to Gen 0", BTN_BLUE, BTN_BLUE_H)
 
         self.buttons = [self.btn_load, self.btn_apply, self.btn_play,
                         self.btn_step, self.btn_back, self.btn_clear,
-                        self.btn_random, self.btn_invert, self.btn_reset,
+                        self.btn_random, self.btn_invert,
                         self.btn_rotate, self.btn_reapply,
                         self.btn_swap_live, self.btn_swap_colors,
                         self.btn_boundary]
@@ -594,20 +597,17 @@ class LifeApp:
                     btn.color = BTN_BG
                     btn.hover_color = BTN_HOVER
 
-        # Dim reset button if no gen0 snapshot
-        if self.gen0_grid is None:
-            self.btn_reset.color = (40, 40, 40)
-            self.btn_reset.hover_color = (40, 40, 40)
-        else:
-            self.btn_reset.color = BTN_BLUE
-            self.btn_reset.hover_color = BTN_BLUE_H
-
         for b in self.buttons:
             b.draw(self.screen, self.font)
         for s in self.sliders:
             s.draw(self.screen, self.font_sm)
         for inp in self.inputs:
             inp.draw(self.screen, self.font_sm)
+
+        # Show reset button only when there's a gen0 snapshot and we've advanced
+        show_reset = self.gen0_grid is not None and self.generation > 0
+        if show_reset:
+            self.btn_reset.draw(self.screen, self.font)
 
         # Live/Dead legend
         ly = self._legend_y
@@ -627,8 +627,11 @@ class LifeApp:
         pygame.draw.rect(self.screen, INPUT_BORDER, (x2, ly, sq, sq), 1)
         self.font_sm.render_to(self.screen, (x2 + sq + 4, ly), "= Dead", TEXT_COLOR)
 
-        # Hint
-        hint_y = self.btn_invert.rect.bottom + 14
+        # Hint — anchor below reset button if visible, otherwise below invert
+        if show_reset:
+            hint_y = self.btn_reset.rect.bottom + 10
+        else:
+            hint_y = self.btn_invert.rect.bottom + 10
         self.font_sm.render_to(self.screen, (x, hint_y),
                                "Click/drag grid to draw", TEXT_DIM)
         self.font_sm.render_to(self.screen, (x, hint_y + 14),
@@ -713,7 +716,7 @@ class LifeApp:
             self._do_random(); return
         if self.btn_invert.hit(pos):
             self._do_invert(); return
-        if self.btn_reset.hit(pos):
+        if self.gen0_grid is not None and self.generation > 0 and self.btn_reset.hit(pos):
             self._do_reset(); return
         if self.btn_swap_live.hit(pos):
             self._do_swap_live(); return
