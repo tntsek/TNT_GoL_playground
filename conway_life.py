@@ -1,5 +1,9 @@
 #!/opt/homebrew/bin/python3.12
-"""Conway's Game of Life with image import, pixel editing, and adjustable speed."""
+"""Conway's Game of Life with image import, pixel editing, and adjustable speed.
+
+Large-grid computation runs asynchronously in a worker process so the UI
+stays responsive at 60 fps regardless of grid size.
+"""
 
 import pygame
 import pygame.freetype
@@ -7,7 +11,7 @@ from PIL import Image, ImageEnhance
 import random
 import sys
 import os
-import copy
+from concurrent.futures import ProcessPoolExecutor
 
 # ---------------------------------------------------------------------------
 # Game of Life logic
@@ -22,6 +26,7 @@ def copy_grid(grid):
 
 
 def step_grid(grid, wrap=True):
+    """Advance one generation (list-of-lists). Used for small grids."""
     rows = len(grid)
     cols = len(grid[0])
     new = make_grid(rows, cols)
@@ -45,6 +50,42 @@ def step_grid(grid, wrap=True):
             else:
                 new[r][c] = 1 if total == 3 else 0
     return new
+
+
+# ---------------------------------------------------------------------------
+# Worker function for async computation (runs in separate process)
+# Uses flat bytes for fast inter-process transfer.
+# ---------------------------------------------------------------------------
+
+def _step_worker(data, rows, cols, wrap, steps=1):
+    """Compute *steps* generations on flat byte data. Returns flat bytes."""
+    buf = bytearray(data)
+    out = bytearray(rows * cols)
+    for _ in range(steps):
+        for r in range(rows):
+            ri = r * cols
+            for c in range(cols):
+                total = 0
+                for dr in (-1, 0, 1):
+                    for dc in (-1, 0, 1):
+                        if dr == 0 and dc == 0:
+                            continue
+                        nr, nc = r + dr, c + dc
+                        if wrap:
+                            nr %= rows
+                            nc %= cols
+                        elif nr < 0 or nr >= rows or nc < 0 or nc >= cols:
+                            continue
+                        total += buf[nr * cols + nc]
+                alive = buf[ri + c]
+                if alive:
+                    out[ri + c] = 1 if total == 2 or total == 3 else 0
+                else:
+                    out[ri + c] = 1 if total == 3 else 0
+            # end col
+        # end row — swap buffers
+        buf, out = out, bytearray(rows * cols)
+    return bytes(buf)
 
 
 def grid_population(grid):
@@ -79,6 +120,7 @@ INPUT_BG   = (35, 35, 35)
 INPUT_ACTIVE = (50, 60, 80)
 INPUT_BORDER = (80, 80, 80)
 INPUT_BORDER_ACTIVE = (74, 158, 255)
+COMPUTING_COLOR = (255, 180, 50)
 
 # ---------------------------------------------------------------------------
 # UI helpers
@@ -162,15 +204,12 @@ class NumberInput:
         self.text = str(value)
 
     def draw(self, surf, font):
-        # Label above
         if self.label:
             font.render_to(surf, (self.rect.x, self.rect.y - 16), self.label, TEXT_DIM)
-        # Box
         bg = INPUT_ACTIVE if self.active else INPUT_BG
         border = INPUT_BORDER_ACTIVE if self.active else INPUT_BORDER
         pygame.draw.rect(surf, bg, self.rect, border_radius=3)
         pygame.draw.rect(surf, border, self.rect, width=1, border_radius=3)
-        # Text
         display = self.text if self.active else str(self.value)
         if self.active:
             display += "|"
@@ -221,7 +260,10 @@ class NumberInput:
 # Main application
 # ---------------------------------------------------------------------------
 
+# Threshold: grids with more cells than this use async computation
+ASYNC_THRESHOLD = 4096
 HISTORY_MAX = 500
+
 
 class LifeApp:
     PANEL_W = 230
@@ -242,7 +284,7 @@ class LifeApp:
         self.font_hd = pygame.freetype.SysFont("Helvetica,Arial,sans-serif", 15)
         self.font_hd.strong = True
 
-        # Grid state — independent width (cols) and height (rows)
+        # Grid state
         self.grid_rows = 64
         self.grid_cols = 64
         self.grid = make_grid(self.grid_rows, self.grid_cols)
@@ -251,10 +293,10 @@ class LifeApp:
         self.speed = 10
         self.threshold = 128
 
-        # Boundary: True = periodic (wrap), False = fixed (dead edges)
+        # Boundary
         self.wrap = True
 
-        # History for undo (step back)
+        # History
         self.history = []
 
         # Source image
@@ -274,7 +316,41 @@ class LifeApp:
         self.clock = pygame.time.Clock()
         self.accum_ms = 0.0
 
+        # Async computation
+        self._pool = ProcessPoolExecutor(max_workers=1)
+        self._pending_future = None  # Future or None
+        self._pending_gen = 0        # generation count the future will produce
+
         self._build_ui()
+
+    # -----------------------------------------------------------------------
+    # Grid ↔ flat bytes conversion
+    # -----------------------------------------------------------------------
+
+    def _grid_to_bytes(self):
+        rows, cols = self.grid_rows, self.grid_cols
+        buf = bytearray(rows * cols)
+        idx = 0
+        for r in range(rows):
+            row = self.grid[r]
+            for c in range(cols):
+                buf[idx] = row[c]
+                idx += 1
+        return bytes(buf)
+
+    def _bytes_to_grid(self, data):
+        rows, cols = self.grid_rows, self.grid_cols
+        self.grid = make_grid(rows, cols)
+        idx = 0
+        for r in range(rows):
+            row = self.grid[r]
+            for c in range(cols):
+                row[c] = data[idx]
+                idx += 1
+
+    # -----------------------------------------------------------------------
+    # UI construction
+    # -----------------------------------------------------------------------
 
     def _build_ui(self):
         px = self.win_w - self.PANEL_W + 14
@@ -289,9 +365,8 @@ class LifeApp:
         self.btn_load = Button((px, y, pw, bh), "Load Image", BTN_BG, BTN_HOVER)
         y += bh + gap
 
-        # --- Grid dimensions: W x H number inputs ---
         self._dim_label_y = y; y += 16
-        input_w = (pw - gap - 20) // 2  # space for "x" label between
+        input_w = (pw - gap - 20) // 2
         self.input_width = NumberInput((px, y, input_w, input_h),
                                        self.grid_cols, 4, 512, "Width")
         x_label_x = px + input_w + 4
@@ -303,7 +378,6 @@ class LifeApp:
         self.btn_apply = Button((px, y, pw, bh), "Apply Size", BTN_BG, BTN_HOVER)
         y += bh + gap
 
-        # Boundary toggle
         self.btn_boundary = Button((px, y, pw, bh),
                                    "Boundary: Wrap" if self.wrap else "Boundary: Fixed",
                                    BTN_BG, BTN_HOVER)
@@ -352,7 +426,6 @@ class LifeApp:
         self.btn_swap_colors = Button((px + half + gap, y, half, bh), "Swap Clr", BTN_BG, BTN_HOVER)
         y += bh + gap
 
-        # Legend position (drawn dynamically in _draw_panel)
         self._legend_y = y
         y += 18
 
@@ -416,17 +489,23 @@ class LifeApp:
         rows, cols = self.grid_rows, self.grid_cols
 
         if self.alive_is_light:
-            color_alive, color_dead = CELL_ALIVE, CELL_DEAD
+            ca, cd = CELL_ALIVE, CELL_DEAD
         else:
-            color_alive, color_dead = CELL_DEAD, CELL_ALIVE
+            ca, cd = CELL_DEAD, CELL_ALIVE
 
-        img = Image.new("RGB", (cols, rows))
-        pix = img.load()
+        # Build raw RGB bytes directly — much faster than PIL pixel-by-pixel
+        raw = bytearray(rows * cols * 3)
+        idx = 0
         for r in range(rows):
             row = self.grid[r]
             for c in range(cols):
-                pix[c, r] = color_alive if row[c] else color_dead
-        surf = pygame.image.fromstring(img.tobytes(), img.size, "RGB")
+                clr = ca if row[c] else cd
+                raw[idx]   = clr[0]
+                raw[idx+1] = clr[1]
+                raw[idx+2] = clr[2]
+                idx += 3
+
+        surf = pygame.image.frombuffer(bytes(raw), (cols, rows), "RGB")
 
         target_w = int(cell * cols)
         target_h = int(cell * rows)
@@ -467,8 +546,11 @@ class LifeApp:
                              (x, sy + 4), (x + self.PANEL_W - 28, sy + 4))
 
         # Info
-        self.font.render_to(self.screen, (x, self._gen_y),
-                            f"Generation: {self.generation}", TEXT_COLOR)
+        gen_text = f"Generation: {self.generation}"
+        if self._pending_future is not None:
+            gen_text += "  computing..."
+        self.font.render_to(self.screen, (x, self._gen_y), gen_text,
+                            COMPUTING_COLOR if self._pending_future else TEXT_COLOR)
         self.font.render_to(self.screen, (x, self._pop_y),
                             f"Population: {grid_population(self.grid)}", TEXT_COLOR)
         self.font_sm.render_to(self.screen, (x, self._size_y),
@@ -514,7 +596,7 @@ class LifeApp:
 
         # Live/Dead legend
         ly = self._legend_y
-        sq = 12  # swatch size
+        sq = 12
         if self.alive_is_light:
             live_clr, dead_clr = CELL_ALIVE, CELL_DEAD
         else:
@@ -556,7 +638,6 @@ class LifeApp:
             elif event.type == pygame.MOUSEMOTION:
                 self._on_mousemove(event.pos, event.buttons)
             elif event.type == pygame.KEYDOWN:
-                # Let active inputs consume keys first
                 handled = False
                 for inp in self.inputs:
                     if inp.active:
@@ -576,12 +657,10 @@ class LifeApp:
         return True
 
     def _on_mousedown(self, pos):
-        # Check number inputs
         clicked_input = False
         for inp in self.inputs:
             if inp.hit(pos):
                 if not inp.active:
-                    # Deactivate others first
                     for other in self.inputs:
                         if other is not inp and other.active:
                             other.deactivate()
@@ -594,7 +673,6 @@ class LifeApp:
         if clicked_input:
             return
 
-        # Check sliders
         for s in self.sliders:
             if s.hit(pos):
                 s.dragging = True
@@ -602,7 +680,6 @@ class LifeApp:
                 self._sync_sliders()
                 return
 
-        # Buttons
         if self.btn_load.hit(pos):
             self._do_load_image(); return
         if self.btn_apply.hit(pos):
@@ -630,9 +707,10 @@ class LifeApp:
         if self.btn_reapply.hit(pos):
             self._do_reapply_image(); return
 
-        # Grid drawing
+        # Grid drawing — cancel any pending computation since grid changed
         p = self._pixel_at(*pos)
         if p:
+            self._cancel_pending()
             r, c = p
             self.draw_value = 0 if self.grid[r][c] else 1
             self.grid[r][c] = self.draw_value
@@ -662,6 +740,33 @@ class LifeApp:
         self.img_contrast = self.slider_contrast.value
 
     # -----------------------------------------------------------------------
+    # Async computation helpers
+    # -----------------------------------------------------------------------
+
+    def _cancel_pending(self):
+        """Cancel any in-progress background computation."""
+        if self._pending_future is not None:
+            self._pending_future.cancel()
+            self._pending_future = None
+
+    def _check_future(self):
+        """Poll the background future. If done, apply the result."""
+        if self._pending_future is None:
+            return
+        if self._pending_future.done():
+            try:
+                result = self._pending_future.result()
+                self._bytes_to_grid(result)
+                self.generation = self._pending_gen
+            except Exception:
+                pass  # computation was cancelled or failed
+            self._pending_future = None
+
+    @property
+    def _is_computing(self):
+        return self._pending_future is not None
+
+    # -----------------------------------------------------------------------
     # History (undo support)
     # -----------------------------------------------------------------------
 
@@ -675,32 +780,51 @@ class LifeApp:
     # -----------------------------------------------------------------------
 
     def _do_step(self):
+        """Request a single step. Async for large grids, sync for small."""
+        if self._is_computing:
+            return  # already working on one
+
         self._push_history()
-        self.grid = step_grid(self.grid, wrap=self.wrap)
-        self.generation += 1
+        cells = self.grid_rows * self.grid_cols
+
+        if cells <= ASYNC_THRESHOLD:
+            # Small grid: compute inline (instant)
+            self.grid = step_grid(self.grid, wrap=self.wrap)
+            self.generation += 1
+        else:
+            # Large grid: offload to worker process
+            data = self._grid_to_bytes()
+            self._pending_gen = self.generation + 1
+            self._pending_future = self._pool.submit(
+                _step_worker, data, self.grid_rows, self.grid_cols, self.wrap)
 
     def _do_back(self):
         if not self.history:
             return
+        self._cancel_pending()
         self.grid, self.generation = self.history.pop()
 
     def _do_clear(self):
+        self._cancel_pending()
         self.grid = make_grid(self.grid_rows, self.grid_cols)
         self.generation = 0
         self.history.clear()
 
     def _do_random(self):
+        self._cancel_pending()
         self.grid = [[random.randint(0, 1) for _ in range(self.grid_cols)]
                      for _ in range(self.grid_rows)]
         self.generation = 0
         self.history.clear()
 
     def _do_invert(self):
+        self._cancel_pending()
         for r in range(self.grid_rows):
             for c in range(self.grid_cols):
                 self.grid[r][c] = 1 - self.grid[r][c]
 
     def _do_apply_size(self):
+        self._cancel_pending()
         new_cols = max(4, min(512, self.input_width.value))
         new_rows = max(4, min(512, self.input_height.value))
         self.input_width.value = new_cols
@@ -725,17 +849,13 @@ class LifeApp:
     # -----------------------------------------------------------------------
 
     def _do_swap_live(self):
-        """Swap which cells are considered alive without changing the visuals.
-        Inverts the grid AND flips the display colors so the screen looks
-        the same, but now the opposite set of cells is 'alive'."""
+        self._cancel_pending()
         for r in range(self.grid_rows):
             for c in range(self.grid_cols):
                 self.grid[r][c] = 1 - self.grid[r][c]
         self.alive_is_light = not self.alive_is_light
 
     def _do_swap_colors(self):
-        """Swap the display colors — alive cells change from light to dark
-        (or vice versa). Grid state stays the same."""
         self.alive_is_light = not self.alive_is_light
 
     # -----------------------------------------------------------------------
@@ -772,8 +892,6 @@ class LifeApp:
         self._apply_image_to_grid()
 
     def _process_source_image(self):
-        """Apply rotation, contrast to source image and return
-        a grayscale PIL Image at grid resolution."""
         if self.source_image is None:
             return None
         img = self.source_image.copy()
@@ -792,7 +910,7 @@ class LifeApp:
         return img
 
     def _apply_image_to_grid(self):
-        """Binarise the processed source image onto the grid."""
+        self._cancel_pending()
         img = self._process_source_image()
         if img is None:
             return
@@ -837,15 +955,23 @@ class LifeApp:
 
             running_app = self._handle_events()
 
-            if self.running and self.speed > 0:
+            # Check if background computation finished
+            self._check_future()
+
+            # Auto-advance when playing
+            if self.running and self.speed > 0 and not self._is_computing:
                 interval = 1000.0 / self.speed
                 self.accum_ms += dt
-                while self.accum_ms >= interval:
-                    self.accum_ms -= interval
+                # Cap accumulator so we don't queue a burst of steps
+                if self.accum_ms >= interval:
+                    self.accum_ms = 0.0
                     self._do_step()
 
             self._draw()
 
+        # Clean up worker pool
+        self._cancel_pending()
+        self._pool.shutdown(wait=False)
         pygame.quit()
 
 
