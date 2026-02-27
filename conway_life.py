@@ -299,6 +299,11 @@ class LifeApp:
         # History
         self.history = []
 
+        # Generation 0 snapshot (for reset)
+        self.gen0_grid = None   # saved by first step or on image load
+        self.gen0_rows = 0
+        self.gen0_cols = 0
+
         # Source image
         self.source_image = None
         self.img_rotation = 0
@@ -434,10 +439,12 @@ class LifeApp:
         self.btn_random = Button((px, y, pw, bh), "Random Fill", BTN_BG, BTN_HOVER)
         y += bh + gap
         self.btn_invert = Button((px, y, pw, bh), "Invert Grid", BTN_BG, BTN_HOVER)
+        y += bh + gap
+        self.btn_reset = Button((px, y, pw, bh), "Reset to Gen 0", BTN_BLUE, BTN_BLUE_H)
 
         self.buttons = [self.btn_load, self.btn_apply, self.btn_play,
                         self.btn_step, self.btn_back, self.btn_clear,
-                        self.btn_random, self.btn_invert,
+                        self.btn_random, self.btn_invert, self.btn_reset,
                         self.btn_rotate, self.btn_reapply,
                         self.btn_swap_live, self.btn_swap_colors,
                         self.btn_boundary]
@@ -587,6 +594,14 @@ class LifeApp:
                     btn.color = BTN_BG
                     btn.hover_color = BTN_HOVER
 
+        # Dim reset button if no gen0 snapshot
+        if self.gen0_grid is None:
+            self.btn_reset.color = (40, 40, 40)
+            self.btn_reset.hover_color = (40, 40, 40)
+        else:
+            self.btn_reset.color = BTN_BLUE
+            self.btn_reset.hover_color = BTN_BLUE_H
+
         for b in self.buttons:
             b.draw(self.screen, self.font)
         for s in self.sliders:
@@ -698,6 +713,8 @@ class LifeApp:
             self._do_random(); return
         if self.btn_invert.hit(pos):
             self._do_invert(); return
+        if self.btn_reset.hit(pos):
+            self._do_reset(); return
         if self.btn_swap_live.hit(pos):
             self._do_swap_live(); return
         if self.btn_swap_colors.hit(pos):
@@ -779,11 +796,35 @@ class LifeApp:
     # Actions
     # -----------------------------------------------------------------------
 
+    def _save_gen0(self):
+        """Snapshot the current grid as generation 0 (if not already saved)."""
+        if self.gen0_grid is None or self.generation == 0:
+            self.gen0_grid = copy_grid(self.grid)
+            self.gen0_rows = self.grid_rows
+            self.gen0_cols = self.grid_cols
+
+    def _do_reset(self):
+        """Reset to the saved generation 0 state."""
+        if self.gen0_grid is None:
+            return
+        self._cancel_pending()
+        self.grid_rows = self.gen0_rows
+        self.grid_cols = self.gen0_cols
+        self.grid = copy_grid(self.gen0_grid)
+        self.input_width.value = self.gen0_cols
+        self.input_width.text = str(self.gen0_cols)
+        self.input_height.value = self.gen0_rows
+        self.input_height.text = str(self.gen0_rows)
+        self.generation = 0
+        self.history.clear()
+
     def _do_step(self):
         """Request a single step. Async for large grids, sync for small."""
         if self._is_computing:
             return  # already working on one
 
+        # Save gen 0 on the very first step
+        self._save_gen0()
         self._push_history()
         cells = self.grid_rows * self.grid_cols
 
@@ -809,6 +850,7 @@ class LifeApp:
         self.grid = make_grid(self.grid_rows, self.grid_cols)
         self.generation = 0
         self.history.clear()
+        self.gen0_grid = None  # nothing to reset to
 
     def _do_random(self):
         self._cancel_pending()
@@ -816,6 +858,9 @@ class LifeApp:
                      for _ in range(self.grid_rows)]
         self.generation = 0
         self.history.clear()
+        self.gen0_grid = copy_grid(self.grid)
+        self.gen0_rows = self.grid_rows
+        self.gen0_cols = self.grid_cols
 
     def _do_invert(self):
         self._cancel_pending()
@@ -932,6 +977,9 @@ class LifeApp:
                     self.grid[r][c] = 1 if px >= thresh else 0
         self.generation = 0
         self.history.clear()
+        self.gen0_grid = copy_grid(self.grid)
+        self.gen0_rows = self.grid_rows
+        self.gen0_cols = self.grid_cols
 
     def _do_img_rotate(self):
         if self.source_image is None:
