@@ -1,0 +1,14 @@
+[project]
+name = "tnt-gol-playground"
+version = "0.1.0"
+description = "Conway's Game of Life playground with alternate tilings and a browser demo"
+requires-python = ">=3.12"
+dependencies = [
+    "pillow>=12.2.0",
+    "pygame>=2.6.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
