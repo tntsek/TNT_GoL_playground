@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TNT Game of Life</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body class="sidebar-open">
+    <div class="app-shell">
+      <main class="stage" aria-label="Simulation stage">
+        <canvas id="life-canvas" aria-label="Game of Life canvas"></canvas>
+        <button
+          id="sidebar-show"
+          class="sidebar-show"
+          type="button"
+          aria-label="Show controls"
+          aria-controls="control-sidebar"
+          aria-expanded="true"
+        >
+          <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true">
+            <path d="M12 4l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </main>
+
+      <aside id="control-sidebar" class="sidebar" aria-label="Simulation controls">
+        <div class="sidebar-inner">
+          <header class="sidebar-top">
+            <span class="sidebar-title">TNT · Game of Life</span>
+            <button
+              id="sidebar-hide"
+              class="sidebar-hide"
+              type="button"
+              aria-label="Hide controls"
+              aria-controls="control-sidebar"
+              aria-expanded="true"
+            >
+              <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+                <path d="M8 4l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </header>
+
+          <div class="stats">
+            <div class="stat"><span>Gen</span><strong id="generation-value">0</strong></div>
+            <div class="stat"><span>Pop</span><strong id="population-value">0</strong></div>
+            <div class="stat"><span>Cells</span><strong id="cells-value">0</strong></div>
+          </div>
+
+          <button id="play-toggle" class="primary full">Play</button>
+
+          <div class="button-row triple">
+            <button id="step-once">Step</button>
+            <button id="clear-grid">Clear</button>
+            <button id="randomize-grid">Random</button>
+          </div>
+
+          <label class="field">
+            <span>Grid</span>
+            <select id="grid-type">
+              <option value="square">Square</option>
+              <option value="triangle">Triangle</option>
+              <option value="rhombus">Rhombus</option>
+              <option value="penrose" selected>Penrose</option>
+              <option value="hex">Hex</option>
+              <option value="trihex">Trihex</option>
+              <option value="oct">Octagon</option>
+              <option value="voronoi">Voronoi</option>
+            </select>
+          </label>
+
+          <div class="field-row">
+            <label class="field">
+              <span>Rows</span>
+              <input id="rows-input" type="number" min="8" max="180" value="64" />
+            </label>
+            <label class="field">
+              <span>Cols</span>
+              <input id="cols-input" type="number" min="8" max="180" value="64" />
+            </label>
+            <label class="field checkbox">
+              <span>Wrap</span>
+              <input id="wrap-toggle" type="checkbox" checked />
+            </label>
+          </div>
+
+          <div class="button-row">
+            <button id="apply-size">Apply Size</button>
+            <button id="rebuild-map">Rebuild</button>
+          </div>
+
+          <label class="range">
+            <span>Speed <strong id="speed-value">8</strong>/s</span>
+            <input id="speed-input" type="range" min="1" max="24" value="8" />
+          </label>
+          <label class="range">
+            <span>Density <strong id="density-value">28%</strong></span>
+            <input id="density-input" type="range" min="5" max="95" value="28" />
+          </label>
+          <label class="range">
+            <span>Threshold <strong id="threshold-value">140</strong></span>
+            <input id="threshold-input" type="range" min="0" max="255" value="140" />
+          </label>
+
+          <div class="io-row">
+            <label class="file-field">
+              <span>Image</span>
+              <input id="image-input" type="file" accept="image/*" />
+            </label>
+            <div class="button-row">
+              <button id="invert-grid">Invert</button>
+              <button id="snapshot-image">Save PNG</button>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
