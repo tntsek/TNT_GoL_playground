@@ -223,79 +223,70 @@ def generate_penrose_tiling(subdivisions=5):
     """Generate Penrose P3 (thick/thin rhombi) via Robinson triangle decomposition.
     Returns (polys, face_types, bbox) where face_types 0=thick, 1=thin.
     """
-    # Start with 10 acute half-triangles forming a decagonal "sun"
-    # Each triangle is (type, A, B, C) where type 0=acute, 1=obtuse
+    # Use the classic Robinson triangle deflation, then merge paired
+    # half-triangles along their shared base edge into rhombi. The old
+    # implementation let the vertex ordering drift during subdivision, which
+    # caused most cells to remain triangles instead of a true Penrose rhomb tiling.
     triangles = []
     for i in range(10):
-        angle1 = (2 * i) * math.pi / 10
-        angle2 = (2 * i + 2) * math.pi / 10
-        A = complex(0, 0)
-        B = cmath.rect(1, angle1)
-        C = cmath.rect(1, angle2)
+        B = cmath.rect(1, (2 * i - 1) * math.pi / 10)
+        C = cmath.rect(1, (2 * i + 1) * math.pi / 10)
         if i % 2 == 0:
-            triangles.append((0, A, B, C))  # acute
-        else:
-            triangles.append((0, A, C, B))  # acute (flipped)
+            B, C = C, B
+        triangles.append((0, 0j, B, C))
 
-    # Subdivide
     for _ in range(subdivisions):
         new_tri = []
-        for typ, A, B, C in triangles:
-            if typ == 0:  # acute (thick) half-triangle
+        for color, A, B, C in triangles:
+            if color == 0:
                 P = A + (B - A) / PHI
                 new_tri.append((0, C, P, B))
                 new_tri.append((1, P, C, A))
-            else:  # obtuse (thin) half-triangle
+            else:
                 Q = B + (A - B) / PHI
-                new_tri.append((1, Q, A, B))  # keep as obtuse → thin
-                new_tri.append((0, C, A, Q))  # → acute → thick
+                R = B + (C - B) / PHI
+                new_tri.append((1, R, C, A))
+                new_tri.append((1, Q, R, B))
+                new_tri.append((0, R, Q, A))
         triangles = new_tri
 
-    # Merge matching triangle pairs into rhombi by shared hypotenuse
-    # Group triangles that share edge B-C (the "base" edge)
-    edge_map = {}
-    for i, (typ, A, B, C) in enumerate(triangles):
-        # Key: sorted endpoints of the base edge (B, C)
-        key = (round(B.real, 8), round(B.imag, 8), round(C.real, 8), round(C.imag, 8))
-        key_rev = (round(C.real, 8), round(C.imag, 8), round(B.real, 8), round(B.imag, 8))
-        if key_rev in edge_map:
-            j = edge_map.pop(key_rev)
-            typ_j, A_j, B_j, C_j = triangles[j]
-            # Merge: the two apex points (A, A_j) and shared base (B, C)
-            # Form rhombus: A -> B -> A_j -> C
-            poly = [(A.real, A.imag), (B.real, B.imag),
-                    (A_j.real, A_j.imag), (C.real, C.imag)]
-            face_type = 0 if typ == 0 else 1  # thick or thin
-            edge_map[f"merged_{i}_{j}"] = (poly, face_type)
-        else:
-            edge_map[key] = i
+    def _edge_key(p, q):
+        a = (round(p.real, 8), round(p.imag, 8))
+        b = (round(q.real, 8), round(q.imag, 8))
+        return tuple(sorted((a, b)))
+
+    def _order_poly(poly):
+        cx = sum(x for x, _ in poly) / len(poly)
+        cy = sum(y for _, y in poly) / len(poly)
+        return sorted(poly, key=lambda pt: math.atan2(pt[1] - cy, pt[0] - cx))
+
+    base_groups = {}
+    for tri in triangles:
+        base_groups.setdefault(_edge_key(tri[2], tri[3]), []).append(tri)
 
     polys = []
     face_types = []
-    for k, v in edge_map.items():
-        if isinstance(v, tuple) and len(v) == 2:
-            poly, ft = v
-            polys.append(poly)
-            face_types.append(ft)
-    # Handle unmerged triangles (shouldn't happen much)
-    for k, v in edge_map.items():
-        if isinstance(v, int):
-            typ, A, B, C = triangles[v]
-            poly = [(A.real, A.imag), (B.real, B.imag), (C.real, C.imag)]
-            polys.append(poly)
-            face_types.append(0 if typ == 0 else 1)
+    for shared in base_groups.values():
+        if len(shared) != 2 or shared[0][0] != shared[1][0]:
+            continue
+        color, A, B, C = shared[0]
+        _, A2, _, _ = shared[1]
+        poly = _order_poly([
+            (A.real, A.imag),
+            (B.real, B.imag),
+            (A2.real, A2.imag),
+            (C.real, C.imag),
+        ])
+        # color 1 triangles merge into the thicker 72-degree rhombs, while
+        # color 0 triangles merge into the thinner 36-degree rhombs.
+        face_type = 0 if color == 1 else 1
+        polys.append(poly)
+        face_types.append(face_type)
 
     if not polys:
         return [], [], (1, 1)
 
-    # Normalize to origin
-    all_x = [p[0] for poly in polys for p in poly]
-    all_y = [p[1] for poly in polys for p in poly]
-    min_x, min_y = min(all_x), min(all_y)
-    polys = [[(x - min_x, y - min_y) for x, y in poly] for poly in polys]
-    all_x = [p[0] for poly in polys for p in poly]
-    all_y = [p[1] for poly in polys for p in poly]
-    bbox = (max(all_x), max(all_y))
+    polys, bbox = _normalize_tiling(polys)
     return polys, face_types, bbox
 
 
