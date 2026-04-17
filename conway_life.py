@@ -11,7 +11,13 @@ import pygame.freetype
 from PIL import Image, ImageEnhance
 import sys
 import os
+import math
+import cmath
 from concurrent.futures import ProcessPoolExecutor
+
+PHI = (1 + math.sqrt(5)) / 2
+SQRT3 = math.sqrt(3)
+SQRT2 = math.sqrt(2)
 
 # ---------------------------------------------------------------------------
 # Game of Life logic
@@ -90,6 +96,441 @@ def _step_worker(data, rows, cols, wrap, steps=1):
 
 def grid_population(grid):
     return sum(sum(row) for row in grid)
+
+
+# ---------------------------------------------------------------------------
+# Triangular grid logic — 12 vertex-sharing neighbors (Moore analog)
+# ---------------------------------------------------------------------------
+
+# Up-pointing triangle at (r, c) where (r+c) is even
+_TRI_UP_OFFSETS = (
+    (-1, -1), (-1, 0), (-1, 1),
+    (0, -2), (0, -1), (0, 1), (0, 2),
+    (1, -2), (1, -1), (1, 0), (1, 1), (1, 2),
+)
+
+# Down-pointing triangle at (r, c) where (r+c) is odd
+_TRI_DN_OFFSETS = (
+    (-1, -2), (-1, -1), (-1, 0), (-1, 1), (-1, 2),
+    (0, -2), (0, -1), (0, 1), (0, 2),
+    (1, -1), (1, 0), (1, 1),
+)
+
+
+def step_grid_tri(grid, wrap=True):
+    """Advance one generation on a triangular grid with 12 neighbors, B3/S23."""
+    rows = len(grid)
+    cols = len(grid[0])
+    new = make_grid(rows, cols)
+    for r in range(rows):
+        for c in range(cols):
+            is_up = (r + c) % 2 == 0
+            offsets = _TRI_UP_OFFSETS if is_up else _TRI_DN_OFFSETS
+            total = 0
+            for dr, dc in offsets:
+                nr, nc = r + dr, c + dc
+                if wrap:
+                    nr %= rows
+                    nc %= cols
+                else:
+                    if nr < 0 or nr >= rows or nc < 0 or nc >= cols:
+                        continue
+                total += grid[nr][nc]
+            if grid[r][c]:
+                new[r][c] = 1 if total in (2, 3) else 0
+            else:
+                new[r][c] = 1 if total == 3 else 0
+    return new
+
+
+def _point_in_tri(px, py, ax, ay, bx, by, cx, cy):
+    """Return True if point (px,py) is inside triangle (a,b,c)."""
+    d1 = (px - bx) * (ay - by) - (ax - bx) * (py - by)
+    d2 = (px - cx) * (by - cy) - (bx - cx) * (py - cy)
+    d3 = (px - ax) * (cy - ay) - (cx - ax) * (py - ay)
+    has_neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
+    has_pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
+    return not (has_neg and has_pos)
+
+
+# ---------------------------------------------------------------------------
+# Tiling helpers — rhombus (cube), Penrose, generic polygon
+# ---------------------------------------------------------------------------
+
+def _point_in_polygon(px, py, poly):
+    """Ray-casting point-in-polygon test."""
+    n = len(poly)
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        if ((yi > py) != (yj > py)) and (px < (xj - xi) * (py - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+# Cube palette presets: (name, top_alive, left_alive, right_alive, dead)
+CUBE_PALETTES = [
+    ("Classic",  (180, 180, 200), (120, 120, 140), (80, 80, 100),   (30, 30, 35)),
+    ("Marble",   (220, 215, 205), (170, 160, 145), (130, 120, 110), (40, 38, 35)),
+    ("Ocean",    (100, 200, 220), (40, 130, 170),  (20, 80, 120),   (15, 25, 40)),
+    ("Sunset",   (255, 200, 100), (220, 120, 60),  (160, 70, 40),   (35, 20, 20)),
+    ("Forest",   (120, 200, 100), (60, 140, 50),   (30, 90, 30),    (20, 30, 15)),
+    ("Neon",     (0, 255, 200),   (200, 0, 255),   (255, 0, 100),   (10, 10, 15)),
+]
+
+
+def generate_rhombic_tiling(cube_rows, cube_cols):
+    """Generate rhombus (cube illusion) tiling.
+    Returns (polys, face_types, bbox) where face_types 0=top, 1=left, 2=right.
+    """
+    polys = []
+    face_types = []
+    # Each "cube" is made of 3 rhombi
+    dx_col = SQRT3  # horizontal distance between cube centers in same row
+    dy_row = 3.0    # vertical distance between rows
+    for cr in range(cube_rows):
+        for cc in range(cube_cols):
+            # Center of this cube
+            cx = cc * dx_col + (0.5 * dx_col if cr % 2 else 0)
+            cy = cr * 1.5
+            h = SQRT3 / 2
+            # Top rhombus (two triangles forming top face)
+            top = [(cx, cy - 1), (cx + h, cy - 0.5), (cx, cy), (cx - h, cy - 0.5)]
+            # Left rhombus
+            left = [(cx - h, cy - 0.5), (cx, cy), (cx, cy + 1), (cx - h, cy + 0.5)]
+            # Right rhombus
+            right = [(cx + h, cy - 0.5), (cx, cy), (cx, cy + 1), (cx + h, cy + 0.5)]
+            polys.append(top)
+            face_types.append(0)
+            polys.append(left)
+            face_types.append(1)
+            polys.append(right)
+            face_types.append(2)
+    # Compute bounding box
+    all_x = [p[0] for poly in polys for p in poly]
+    all_y = [p[1] for poly in polys for p in poly]
+    bbox = (max(all_x) - min(all_x), max(all_y) - min(all_y))
+    # Normalize to start at origin
+    min_x, min_y = min(all_x), min(all_y)
+    polys = [[(x - min_x, y - min_y) for x, y in poly] for poly in polys]
+    return polys, face_types, bbox
+
+
+def generate_penrose_tiling(subdivisions=5):
+    """Generate Penrose P3 (thick/thin rhombi) via Robinson triangle decomposition.
+    Returns (polys, face_types, bbox) where face_types 0=thick, 1=thin.
+    """
+    # Start with 10 acute half-triangles forming a decagonal "sun"
+    # Each triangle is (type, A, B, C) where type 0=acute, 1=obtuse
+    triangles = []
+    for i in range(10):
+        angle1 = (2 * i) * math.pi / 10
+        angle2 = (2 * i + 2) * math.pi / 10
+        A = complex(0, 0)
+        B = cmath.rect(1, angle1)
+        C = cmath.rect(1, angle2)
+        if i % 2 == 0:
+            triangles.append((0, A, B, C))  # acute
+        else:
+            triangles.append((0, A, C, B))  # acute (flipped)
+
+    # Subdivide
+    for _ in range(subdivisions):
+        new_tri = []
+        for typ, A, B, C in triangles:
+            if typ == 0:  # acute (thick) half-triangle
+                P = A + (B - A) / PHI
+                new_tri.append((0, C, P, B))
+                new_tri.append((1, P, C, A))
+            else:  # obtuse (thin) half-triangle
+                Q = B + (A - B) / PHI
+                new_tri.append((1, Q, A, B))  # keep as obtuse → thin
+                new_tri.append((0, C, A, Q))  # → acute → thick
+        triangles = new_tri
+
+    # Merge matching triangle pairs into rhombi by shared hypotenuse
+    # Group triangles that share edge B-C (the "base" edge)
+    edge_map = {}
+    for i, (typ, A, B, C) in enumerate(triangles):
+        # Key: sorted endpoints of the base edge (B, C)
+        key = (round(B.real, 8), round(B.imag, 8), round(C.real, 8), round(C.imag, 8))
+        key_rev = (round(C.real, 8), round(C.imag, 8), round(B.real, 8), round(B.imag, 8))
+        if key_rev in edge_map:
+            j = edge_map.pop(key_rev)
+            typ_j, A_j, B_j, C_j = triangles[j]
+            # Merge: the two apex points (A, A_j) and shared base (B, C)
+            # Form rhombus: A -> B -> A_j -> C
+            poly = [(A.real, A.imag), (B.real, B.imag),
+                    (A_j.real, A_j.imag), (C.real, C.imag)]
+            face_type = 0 if typ == 0 else 1  # thick or thin
+            edge_map[f"merged_{i}_{j}"] = (poly, face_type)
+        else:
+            edge_map[key] = i
+
+    polys = []
+    face_types = []
+    for k, v in edge_map.items():
+        if isinstance(v, tuple) and len(v) == 2:
+            poly, ft = v
+            polys.append(poly)
+            face_types.append(ft)
+    # Handle unmerged triangles (shouldn't happen much)
+    for k, v in edge_map.items():
+        if isinstance(v, int):
+            typ, A, B, C = triangles[v]
+            poly = [(A.real, A.imag), (B.real, B.imag), (C.real, C.imag)]
+            polys.append(poly)
+            face_types.append(0 if typ == 0 else 1)
+
+    if not polys:
+        return [], [], (1, 1)
+
+    # Normalize to origin
+    all_x = [p[0] for poly in polys for p in poly]
+    all_y = [p[1] for poly in polys for p in poly]
+    min_x, min_y = min(all_x), min(all_y)
+    polys = [[(x - min_x, y - min_y) for x, y in poly] for poly in polys]
+    all_x = [p[0] for poly in polys for p in poly]
+    all_y = [p[1] for poly in polys for p in poly]
+    bbox = (max(all_x), max(all_y))
+    return polys, face_types, bbox
+
+
+def _normalize_tiling(polys):
+    """Shift polys so they start at (0,0) and return bbox."""
+    all_x = [p[0] for poly in polys for p in poly]
+    all_y = [p[1] for poly in polys for p in poly]
+    if not all_x:
+        return polys, (1, 1)
+    min_x, min_y = min(all_x), min(all_y)
+    polys = [[(x - min_x, y - min_y) for x, y in poly] for poly in polys]
+    all_x = [p[0] for poly in polys for p in poly]
+    all_y = [p[1] for poly in polys for p in poly]
+    return polys, (max(all_x), max(all_y))
+
+
+def generate_hex_tiling(rows, cols):
+    """Pointy-top hexagonal tiling. face_type 0 for all."""
+    polys = []
+    face_types = []
+    s = 1.0
+    h = SQRT3 * s / 2
+    for r in range(rows):
+        for c in range(cols):
+            cx = c * SQRT3 * s + (h if r % 2 else 0)
+            cy = r * 1.5 * s
+            verts = [
+                (cx + h, cy + s / 2),
+                (cx, cy + s),
+                (cx - h, cy + s / 2),
+                (cx - h, cy - s / 2),
+                (cx, cy - s),
+                (cx + h, cy - s / 2),
+            ]
+            polys.append(verts)
+            face_types.append(0)
+    polys, bbox = _normalize_tiling(polys)
+    return polys, face_types, bbox
+
+
+def generate_trihex_tiling(rows, cols):
+    """Trihexagonal tiling: hexagons + equilateral triangles.
+    face_types: 0 = hex, 1 = triangle.
+    """
+    polys = []
+    face_types = []
+    s = 1.0
+    h = SQRT3 * s / 2
+    hex_count = 0
+    # Place hexes on trihexagonal sublattice: center at
+    # i*(√3 s, s) + j*(√3 s, -s)
+    centers = []
+    for i in range(rows):
+        for j in range(cols):
+            cx = (i + j) * SQRT3 * s
+            cy = (i - j) * s
+            centers.append((cx, cy))
+            verts = [
+                (cx + h, cy + s / 2),
+                (cx, cy + s),
+                (cx - h, cy + s / 2),
+                (cx - h, cy - s / 2),
+                (cx, cy - s),
+                (cx + h, cy - s / 2),
+            ]
+            polys.append(verts)
+            face_types.append(0)
+            hex_count += 1
+
+    # Add triangles around each hex (dedupe by canonical vertex key)
+    added_tris = set()
+    for h_idx in range(hex_count):
+        hex_vs = polys[h_idx]
+        cx, cy = centers[h_idx]
+        for k in range(6):
+            v1 = hex_vs[k]
+            v2 = hex_vs[(k + 1) % 6]
+            mx = (v1[0] + v2[0]) / 2
+            my = (v1[1] + v2[1]) / 2
+            dx = mx - cx
+            dy = my - cy
+            ax = mx + dx
+            ay = my + dy
+            tri = [v1, v2, (ax, ay)]
+            key = tuple(sorted([(round(p[0], 4), round(p[1], 4)) for p in tri]))
+            if key in added_tris:
+                continue
+            added_tris.add(key)
+            polys.append(tri)
+            face_types.append(1)
+    polys, bbox = _normalize_tiling(polys)
+    return polys, face_types, bbox
+
+
+def generate_oct_tiling(rows, cols):
+    """Truncated square tiling (4.8.8): octagons + diamond squares.
+    face_types: 0 = octagon, 1 = square.
+    """
+    polys = []
+    face_types = []
+    s = 1.0
+    k = s / 2
+    big = k + s / math.sqrt(2)
+    W = s * (1 + math.sqrt(2))
+    d = s / math.sqrt(2)  # diamond half-diagonal
+    for r in range(rows):
+        for c in range(cols):
+            cx = c * W
+            cy = r * W
+            oct_p = [
+                (cx - k, cy + big), (cx + k, cy + big),
+                (cx + big, cy + k), (cx + big, cy - k),
+                (cx + k, cy - big), (cx - k, cy - big),
+                (cx - big, cy - k), (cx - big, cy + k),
+            ]
+            polys.append(oct_p)
+            face_types.append(0)
+            if r < rows - 1 and c < cols - 1:
+                sx = cx + W / 2
+                sy = cy + W / 2
+                sq_p = [
+                    (sx, sy - d), (sx + d, sy),
+                    (sx, sy + d), (sx - d, sy),
+                ]
+                polys.append(sq_p)
+                face_types.append(1)
+    polys, bbox = _normalize_tiling(polys)
+    return polys, face_types, bbox
+
+
+def _clip_halfplane(poly, a, b, c):
+    """Clip polygon to half-plane a*x + b*y <= c (Sutherland-Hodgman)."""
+    if not poly:
+        return []
+    out = []
+    n = len(poly)
+    for i in range(n):
+        cur = poly[i]
+        prev = poly[(i - 1) % n]
+        d_cur = a * cur[0] + b * cur[1] - c
+        d_prev = a * prev[0] + b * prev[1] - c
+        cur_in = d_cur <= 0
+        prev_in = d_prev <= 0
+        if cur_in:
+            if not prev_in:
+                t = d_prev / (d_prev - d_cur)
+                out.append((prev[0] + t * (cur[0] - prev[0]),
+                            prev[1] + t * (cur[1] - prev[1])))
+            out.append(cur)
+        elif prev_in:
+            t = d_prev / (d_prev - d_cur)
+            out.append((prev[0] + t * (cur[0] - prev[0]),
+                        prev[1] + t * (cur[1] - prev[1])))
+    return out
+
+
+def generate_voronoi_tiling(rows, cols, seed=42):
+    """Voronoi diagram from jittered grid seeds via half-plane intersection."""
+    import random
+    rng = random.Random(seed)
+    seeds = []
+    for r in range(rows):
+        for c in range(cols):
+            x = c + 0.15 + 0.7 * rng.random()
+            y = r + 0.15 + 0.7 * rng.random()
+            seeds.append((x, y))
+    # Bounding box with a little margin
+    bx0, by0 = -0.3, -0.3
+    bx1, by1 = cols - 0.7, rows - 0.7
+    polys = []
+    face_types = []
+    n = len(seeds)
+    for i in range(n):
+        sx, sy = seeds[i]
+        cell = [(bx0, by0), (bx1, by0), (bx1, by1), (bx0, by1)]
+        # Only check nearby seeds (within ~3 grid units) for speed
+        for j in range(n):
+            if i == j:
+                continue
+            tx, ty = seeds[j]
+            # Quick distance cull
+            if (tx - sx) ** 2 + (ty - sy) ** 2 > 25:
+                continue
+            a = 2 * (tx - sx)
+            b = 2 * (ty - sy)
+            c = tx * tx + ty * ty - sx * sx - sy * sy
+            cell = _clip_halfplane(cell, a, b, c)
+            if not cell:
+                break
+        if cell and len(cell) >= 3:
+            polys.append(cell)
+            # Use distance from center as a "face type" for color variation
+            cx_grid = cols / 2
+            cy_grid = rows / 2
+            dist = math.hypot(sx - cx_grid, sy - cy_grid)
+            face_types.append(int(dist) % 3)
+    polys, bbox = _normalize_tiling(polys)
+    return polys, face_types, bbox
+
+
+def compute_tiling_neighbors(polys, tolerance=1e-6):
+    """Compute neighbor lists via vertex-sharing."""
+    # Build a map from rounded vertex → set of cell indices
+    vtx_map = {}
+    for i, poly in enumerate(polys):
+        for x, y in poly:
+            key = (round(x / tolerance) * tolerance,
+                   round(y / tolerance) * tolerance)
+            rk = (round(key[0], 5), round(key[1], 5))
+            if rk not in vtx_map:
+                vtx_map[rk] = set()
+            vtx_map[rk].add(i)
+    # For each cell, neighbors = union of cells sharing any vertex, minus self
+    nbrs = [set() for _ in range(len(polys))]
+    for i, poly in enumerate(polys):
+        for x, y in poly:
+            key = (round(x / tolerance) * tolerance,
+                   round(y / tolerance) * tolerance)
+            rk = (round(key[0], 5), round(key[1], 5))
+            for j in vtx_map.get(rk, ()):
+                if j != i:
+                    nbrs[i].add(j)
+    return [list(s) for s in nbrs]
+
+
+def step_tiling(states, neighbors):
+    """Advance one generation on a flat cell array, B3/S23."""
+    new = [0] * len(states)
+    for i in range(len(states)):
+        total = sum(states[j] for j in neighbors[i])
+        if states[i]:
+            new[i] = 1 if total in (2, 3) else 0
+        else:
+            new[i] = 1 if total == 3 else 0
+    return new
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +929,41 @@ class TextInput:
         return False
 
 
+class RotationDial:
+    """Circular dial widget for setting an angle (0-360 degrees)."""
+
+    def __init__(self, center, radius, value=0):
+        self.cx, self.cy = center
+        self.radius = radius
+        self.value = value  # degrees
+        self.dragging = False
+
+    def draw(self, surf, font):
+        # Outer circle
+        pygame.draw.circle(surf, SLIDER_BG, (self.cx, self.cy), self.radius, 2)
+        # Handle position
+        angle_rad = math.radians(self.value - 90)  # 0° = top
+        hx = self.cx + int(self.radius * math.cos(angle_rad))
+        hy = self.cy + int(self.radius * math.sin(angle_rad))
+        pygame.draw.circle(surf, SLIDER_FG, (hx, hy), 6)
+        # Line from center to handle
+        pygame.draw.line(surf, SLIDER_FG, (self.cx, self.cy), (hx, hy), 2)
+
+    def hit(self, pos):
+        dx = pos[0] - self.cx
+        dy = pos[1] - self.cy
+        return dx * dx + dy * dy <= (self.radius + 8) ** 2
+
+    def update_drag(self, pos):
+        dx = pos[0] - self.cx
+        dy = pos[1] - self.cy
+        angle = math.degrees(math.atan2(dy, dx)) + 90  # 0° = top
+        self.value = int(angle) % 360
+
+    def reposition(self, cx, cy):
+        self.cx, self.cy = cx, cy
+
+
 # ---------------------------------------------------------------------------
 # Main application
 # ---------------------------------------------------------------------------
@@ -561,6 +1037,19 @@ class LifeApp:
 
         # Play direction
         self.play_direction = 1  # +1 forward, -1 backward
+
+        # Grid type: "square", "triangle", "rhombus", "penrose"
+        self.grid_type = "square"
+        self.tri_angle = 0  # rotation angle for triangle grid (degrees)
+        self.cube_palette_idx = 0
+
+        # Tiling state (for rhombus/penrose modes)
+        self.tiling_polys = []
+        self.tiling_nbrs = []
+        self.tiling_states = []
+        self.tiling_face = []
+        self.tiling_bbox = (1, 1)
+        self.tiling_history = []
 
         # --- Interaction mode ---
         self.mode = "draw"  # "draw", "text", "select"
@@ -659,6 +1148,34 @@ class LifeApp:
                                 BTN_BG, BTN_HOVER)
         y += bh + gap
 
+        # --- Grid type selector (2 rows of 4 buttons) ---
+        gt_w = (pw - gap * 3) // 4
+        gt_h = 26
+        self.btn_gt_sq = Button((px, y, gt_w, gt_h), "Sq")
+        self.btn_gt_tri = Button((px + (gt_w + gap), y, gt_w, gt_h), "Tri")
+        self.btn_gt_cube = Button((px + (gt_w + gap) * 2, y, gt_w, gt_h), "Cube")
+        self.btn_gt_pen = Button((px + (gt_w + gap) * 3, y, gt_w, gt_h), "Pen")
+        y += gt_h + gap
+        self.btn_gt_hex = Button((px, y, gt_w, gt_h), "Hex")
+        self.btn_gt_thex = Button((px + (gt_w + gap), y, gt_w, gt_h), "Thx")
+        self.btn_gt_oct = Button((px + (gt_w + gap) * 2, y, gt_w, gt_h), "Oct")
+        self.btn_gt_vor = Button((px + (gt_w + gap) * 3, y, gt_w, gt_h), "Vor")
+        y += gt_h + gap
+
+        # --- Grid-type-specific controls ---
+        self._gt_controls_y = y
+        self.tri_dial = RotationDial((px + pw - 24, y + 24), 20, self.tri_angle)
+        self.slider_tri_angle = Slider((px, y + 18, pw - 56, 14), 0, 359,
+                                        self.tri_angle, 1, "Angle")
+        self.btn_cube_palette = Button((px, y, pw, bh),
+                                        f"Style: {CUBE_PALETTES[self.cube_palette_idx][0]}",
+                                        BTN_BG, BTN_HOVER)
+        if self.grid_type == "triangle":
+            y += 44
+        elif self.grid_type == "rhombus":
+            y += bh + gap
+        # penrose and square: no extra controls
+
         self.slider_thresh = Slider((px, y + 18, pw, 14), 0, 255, self.threshold, 1, "Threshold")
         y += 44
 
@@ -733,9 +1250,9 @@ class LifeApp:
         text_y += 16
 
         # Calculate y offset based on mode
-        if self.mode == "text":
+        if self.mode == "text" and not self._is_tiling:
             y = text_y
-        elif self.mode == "select":
+        elif self.mode == "select" and not self._is_tiling:
             self._select_hint_y = y
             y += 48  # room for instructions
         else:
@@ -764,9 +1281,16 @@ class LifeApp:
                         self.btn_swap_live, self.btn_swap_colors,
                         self.btn_boundary, self.btn_thick,
                         self.btn_mode_draw, self.btn_mode_text,
-                        self.btn_mode_select]
+                        self.btn_mode_select,
+                        self.btn_gt_sq, self.btn_gt_tri,
+                        self.btn_gt_cube, self.btn_gt_pen,
+                        self.btn_gt_hex, self.btn_gt_thex,
+                        self.btn_gt_oct, self.btn_gt_vor,
+                        self.btn_cube_palette]
         self.sliders = [self.slider_thresh, self.slider_speed,
                         self.slider_contrast]
+        if self.grid_type == "triangle":
+            self.sliders.append(self.slider_tri_angle)
         self.text_inputs = [self.input_char_width, self.input_char_height,
                             self.input_text_spacing, self.input_space_width]
         self.inputs = [self.input_width, self.input_height]
@@ -797,12 +1321,257 @@ class LifeApp:
         return cell, ox, oy
 
     def _pixel_at(self, mx, my):
+        if self._is_tiling:
+            return self._pixel_at_tiling(mx, my)
+        if self.grid_type == "triangle":
+            return self._pixel_at_tri(mx, my)
         cell, ox, oy = self._cell_metrics()
         c = int((mx - ox) // cell)
         r = int((my - oy) // cell)
         if 0 <= r < self.grid_rows and 0 <= c < self.grid_cols:
             return r, c
         return None
+
+    # -----------------------------------------------------------------------
+    # Triangle grid geometry
+    # -----------------------------------------------------------------------
+
+    def _tri_metrics(self):
+        """Return (cell_w, cell_h, ox, oy) for the triangular grid."""
+        gx, gy, gw, gh = self._grid_area()
+        rows, cols = self.grid_rows, self.grid_cols
+        # Each triangle has width = cell_w, height = cell_h
+        # cols triangles wide, rows triangles tall
+        # Horizontal: cols/2 full triangle widths (each up+down pair = 1 width)
+        tri_w_total = (cols + 1) / 2
+        tri_h_total = rows
+        base_w = gw / tri_w_total
+        base_h = gh / tri_h_total
+        # Maintain equilateral proportions
+        # For equilateral: height = width * sqrt(3)/2
+        # So cell_w = min(base_w, base_h / (sqrt(3)/2))
+        cell_w = min(base_w, base_h * 2 / SQRT3)
+        cell_h = cell_w * SQRT3 / 2
+        cell_w *= self.zoom
+        cell_h *= self.zoom
+        total_w = tri_w_total * cell_w
+        total_h = tri_h_total * cell_h
+        cx = gx + gw / 2 + self.pan_x
+        cy = gy + gh / 2 + self.pan_y
+        ox = cx - total_w / 2
+        oy = cy - total_h / 2
+        return cell_w, cell_h, ox, oy
+
+    def _rot_pts(self, pts, cx, cy):
+        """Rotate points by self.tri_angle degrees around (cx, cy)."""
+        if self.tri_angle == 0:
+            return pts
+        a = math.radians(self.tri_angle)
+        cos_a, sin_a = math.cos(a), math.sin(a)
+        result = []
+        for x, y in pts:
+            dx, dy = x - cx, y - cy
+            result.append((cx + dx * cos_a - dy * sin_a,
+                          cy + dx * sin_a + dy * cos_a))
+        return result
+
+    def _tri_cell_pts(self, r, c, cell_w, cell_h, ox, oy):
+        """Return 3 screen-space vertices for triangle at (r, c)."""
+        is_up = (r + c) % 2 == 0
+        # x position: each column is half a triangle width
+        x_base = ox + c * cell_w / 2
+        y_base = oy + r * cell_h
+        if is_up:
+            pts = [(x_base, y_base + cell_h),
+                   (x_base + cell_w / 2, y_base),
+                   (x_base + cell_w, y_base + cell_h)]
+        else:
+            pts = [(x_base, y_base),
+                   (x_base + cell_w, y_base),
+                   (x_base + cell_w / 2, y_base + cell_h)]
+        return pts
+
+    def _pixel_at_tri(self, mx, my):
+        """Hit detection for triangular grid with rotation support."""
+        cell_w, cell_h, ox, oy = self._tri_metrics()
+        rows, cols = self.grid_rows, self.grid_cols
+        # Grid center for rotation
+        total_w = (cols + 1) / 2 * cell_w
+        total_h = rows * cell_h
+        gcx = ox + total_w / 2
+        gcy = oy + total_h / 2
+        # Inverse-rotate mouse position
+        if self.tri_angle != 0:
+            a = math.radians(-self.tri_angle)
+            cos_a, sin_a = math.cos(a), math.sin(a)
+            dx, dy = mx - gcx, my - gcy
+            mx = gcx + dx * cos_a - dy * sin_a
+            my = gcy + dx * sin_a + dy * cos_a
+        # Determine approximate row/col
+        approx_r = int((my - oy) / cell_h)
+        approx_c = int((mx - ox) / (cell_w / 2))
+        # Check nearby cells
+        for dr in range(-1, 3):
+            for dc in range(-2, 4):
+                r = approx_r + dr
+                c = approx_c + dc
+                if 0 <= r < rows and 0 <= c < cols:
+                    pts = self._tri_cell_pts(r, c, cell_w, cell_h, ox, oy)
+                    if _point_in_tri(mx, my, *pts[0], *pts[1], *pts[2]):
+                        return r, c
+        return None
+
+    # -----------------------------------------------------------------------
+    # Tiling geometry (rhombus/penrose)
+    # -----------------------------------------------------------------------
+
+    def _set_grid_type(self, gtype):
+        """Switch grid type, regenerating tiling if needed."""
+        if gtype == self.grid_type:
+            return
+        self.grid_type = gtype
+        self.generation = 0
+        self.history.clear()
+        self.tiling_history.clear()
+        self.gen0_grid = None
+        if self._is_tiling:
+            self._generate_tiling()
+            # Force draw mode in tiling
+            if self.mode != "draw":
+                self.mode = "draw"
+        self._build_ui()
+
+    def _generate_tiling(self):
+        """Generate tiling polygons and neighbors for current grid type."""
+        if self.grid_type == "rhombus":
+            cr = max(2, self.grid_rows // 4)
+            cc = max(2, self.grid_cols // 4)
+            self.tiling_polys, self.tiling_face, self.tiling_bbox = \
+                generate_rhombic_tiling(cr, cc)
+        elif self.grid_type == "penrose":
+            dim = max(self.grid_rows, self.grid_cols)
+            if dim <= 32:
+                subdiv = 4
+            elif dim <= 64:
+                subdiv = 5
+            elif dim <= 128:
+                subdiv = 6
+            else:
+                subdiv = 7
+            self.tiling_polys, self.tiling_face, self.tiling_bbox = \
+                generate_penrose_tiling(subdiv)
+        elif self.grid_type == "hex":
+            hr = max(4, self.grid_rows // 2)
+            hc = max(4, self.grid_cols // 2)
+            self.tiling_polys, self.tiling_face, self.tiling_bbox = \
+                generate_hex_tiling(hr, hc)
+        elif self.grid_type == "trihex":
+            tr = max(3, self.grid_rows // 6)
+            tc = max(3, self.grid_cols // 6)
+            self.tiling_polys, self.tiling_face, self.tiling_bbox = \
+                generate_trihex_tiling(tr, tc)
+        elif self.grid_type == "oct":
+            orr = max(3, self.grid_rows // 4)
+            oc = max(3, self.grid_cols // 4)
+            self.tiling_polys, self.tiling_face, self.tiling_bbox = \
+                generate_oct_tiling(orr, oc)
+        elif self.grid_type == "voronoi":
+            vr = max(4, self.grid_rows // 4)
+            vc = max(4, self.grid_cols // 4)
+            self.tiling_polys, self.tiling_face, self.tiling_bbox = \
+                generate_voronoi_tiling(vr, vc)
+        self.tiling_nbrs = compute_tiling_neighbors(self.tiling_polys)
+        self.tiling_states = [0] * len(self.tiling_polys)
+        self.tiling_history.clear()
+
+    def _tiling_metrics(self):
+        """Return (scale, ox, oy) mapping unit tiling coords to screen."""
+        gx, gy, gw, gh = self._grid_area()
+        bw, bh = self.tiling_bbox
+        if bw < 1e-9 or bh < 1e-9:
+            return 1, gx, gy
+        base_scale = min(gw / bw, gh / bh)
+        scale = base_scale * self.zoom
+        total_w = bw * scale
+        total_h = bh * scale
+        cx = gx + gw / 2 + self.pan_x
+        cy = gy + gh / 2 + self.pan_y
+        ox = cx - total_w / 2
+        oy = cy - total_h / 2
+        return scale, ox, oy
+
+    def _pixel_at_tiling(self, mx, my):
+        """Hit detection for tiling modes. Returns cell index or None."""
+        scale, ox, oy = self._tiling_metrics()
+        # Convert to unit coords
+        ux = (mx - ox) / scale
+        uy = (my - oy) / scale
+        # Check cells (brute force — could optimize with spatial index)
+        for i, poly in enumerate(self.tiling_polys):
+            if _point_in_polygon(ux, uy, poly):
+                return i
+        return None
+
+    def _draw_tiling(self):
+        """Render a tiling of arbitrary polygons."""
+        scale, ox, oy = self._tiling_metrics()
+        if self.grid_type == "rhombus":
+            pal = CUBE_PALETTES[self.cube_palette_idx]
+            colors_alive = [pal[1], pal[2], pal[3]]
+            dead_color = pal[4]
+        elif self.grid_type == "penrose":
+            colors_alive = [(220, 200, 140), (140, 170, 220)]  # gold / blue
+            dead_color = (30, 30, 35)
+        elif self.grid_type == "hex":
+            colors_alive = [(200, 200, 210)]
+            dead_color = CELL_DEAD
+        elif self.grid_type == "trihex":
+            colors_alive = [(210, 180, 140), (120, 180, 200)]  # tan hex, teal tri
+            dead_color = (25, 25, 30)
+        elif self.grid_type == "oct":
+            colors_alive = [(200, 210, 230), (255, 180, 90)]  # light octagon, amber square
+            dead_color = (20, 22, 28)
+        elif self.grid_type == "voronoi":
+            # Organic shifting palette for cells
+            colors_alive = [(120, 220, 180), (200, 140, 220), (240, 200, 120)]
+            dead_color = (18, 20, 25)
+        else:
+            colors_alive = [CELL_ALIVE]
+            dead_color = CELL_DEAD
+
+        n_colors = len(colors_alive)
+        for i, poly in enumerate(self.tiling_polys):
+            screen_pts = [(ox + x * scale, oy + y * scale) for x, y in poly]
+            if self.tiling_states[i]:
+                ft = self.tiling_face[i]
+                color = colors_alive[ft % n_colors]
+            else:
+                color = dead_color
+            pygame.draw.polygon(self.screen, color, screen_pts)
+            pygame.draw.polygon(self.screen, GRID_LINE, screen_pts, 1)
+
+    def _draw_grid_area_tri(self):
+        """Render the triangular grid."""
+        cell_w, cell_h, ox, oy = self._tri_metrics()
+        rows, cols = self.grid_rows, self.grid_cols
+        total_w = (cols + 1) / 2 * cell_w
+        total_h = rows * cell_h
+        gcx = ox + total_w / 2
+        gcy = oy + total_h / 2
+
+        if self.alive_is_light:
+            ca, cd = CELL_ALIVE, CELL_DEAD
+        else:
+            ca, cd = CELL_DEAD, CELL_ALIVE
+
+        for r in range(rows):
+            for c in range(cols):
+                pts = self._tri_cell_pts(r, c, cell_w, cell_h, ox, oy)
+                pts = self._rot_pts(pts, gcx, gcy)
+                color = ca if self.grid[r][c] else cd
+                pygame.draw.polygon(self.screen, color, pts)
+                if cell_w >= 8:
+                    pygame.draw.polygon(self.screen, GRID_LINE, pts, 1)
 
     # -----------------------------------------------------------------------
     # Text rendering helpers
@@ -950,6 +1719,12 @@ class LifeApp:
         pygame.display.flip()
 
     def _draw_grid_area(self):
+        if self._is_tiling:
+            self._draw_tiling()
+            return
+        if self.grid_type == "triangle":
+            self._draw_grid_area_tri()
+            return
         cell, ox, oy = self._cell_metrics()
         rows, cols = self.grid_rows, self.grid_cols
 
@@ -1078,11 +1853,20 @@ class LifeApp:
             gen_text += "  computing..."
         self.font.render_to(self.screen, (x, self._gen_y), gen_text,
                             COMPUTING_COLOR if self._pending_future else TEXT_COLOR)
-        self.font.render_to(self.screen, (x, self._pop_y),
-                            f"Population: {grid_population(self.grid)}", TEXT_COLOR)
-        self.font_sm.render_to(self.screen, (x, self._size_y),
-                               f"Grid: {self.grid_cols} x {self.grid_rows}"
-                               f"  ({'Wrap' if self.wrap else 'Fixed'})", TEXT_DIM)
+        if self._is_tiling:
+            pop = sum(self.tiling_states)
+            cells = len(self.tiling_polys)
+            self.font.render_to(self.screen, (x, self._pop_y),
+                                f"Population: {pop}", TEXT_COLOR)
+            self.font_sm.render_to(self.screen, (x, self._size_y),
+                                   f"{self.grid_type.title()}: {cells} cells", TEXT_DIM)
+        else:
+            self.font.render_to(self.screen, (x, self._pop_y),
+                                f"Population: {grid_population(self.grid)}", TEXT_COLOR)
+            gt_label = self.grid_type.title()
+            self.font_sm.render_to(self.screen, (x, self._size_y),
+                                   f"{gt_label}: {self.grid_cols} x {self.grid_rows}"
+                                   f"  ({'Wrap' if self.wrap else 'Fixed'})", TEXT_DIM)
 
         # Update play buttons — highlight the active direction
         if self.running and self.play_direction == 1:
@@ -1100,7 +1884,8 @@ class LifeApp:
             self.btn_play_rev.hover_color = BTN_AMBER_H
         else:
             self.btn_play_rev.text = "<< Play"
-            if self.history:
+            has_hist = self.tiling_history if self._is_tiling else self.history
+            if has_hist:
                 self.btn_play_rev.color = BTN_GREEN
                 self.btn_play_rev.hover_color = BTN_GREEN_H
             else:
@@ -1112,12 +1897,25 @@ class LifeApp:
         self.btn_thick.text = "Grid 5s: On" if self.thick_lines else "Grid 5s: Off"
 
         # Dim back button if no history
-        if not self.history:
+        has_hist = self.tiling_history if self._is_tiling else self.history
+        if not has_hist:
             self.btn_back.color = (40, 40, 40)
             self.btn_back.hover_color = (40, 40, 40)
         else:
             self.btn_back.color = BTN_BG
             self.btn_back.hover_color = BTN_HOVER
+
+        # Grid type button colors
+        for gbtn, gname in ((self.btn_gt_sq, "square"), (self.btn_gt_tri, "triangle"),
+                             (self.btn_gt_cube, "rhombus"), (self.btn_gt_pen, "penrose"),
+                             (self.btn_gt_hex, "hex"), (self.btn_gt_thex, "trihex"),
+                             (self.btn_gt_oct, "oct"), (self.btn_gt_vor, "voronoi")):
+            if self.grid_type == gname:
+                gbtn.color = BTN_MODE_ACTIVE
+                gbtn.hover_color = BTN_MODE_ACTIVE_H
+            else:
+                gbtn.color = BTN_BG
+                gbtn.hover_color = BTN_HOVER
 
         # Dim image adjust buttons if no source image
         has_img = self.source_image is not None
@@ -1145,20 +1943,29 @@ class LifeApp:
                 mbtn.hover_color = BTN_HOVER
 
         for b in self.buttons:
+            # Skip mode/grid-type conditional buttons
+            if b is self.btn_cube_palette and self.grid_type != "rhombus":
+                continue
+            if b in (self.btn_mode_text, self.btn_mode_select) and self._is_tiling:
+                continue
             b.draw(self.screen, self.font)
         for s in self.sliders:
             s.draw(self.screen, self.font_sm)
         for inp in self.inputs:
             inp.draw(self.screen, self.font_sm)
 
+        # Triangle rotation dial
+        if self.grid_type == "triangle":
+            self.tri_dial.draw(self.screen, self.font_sm)
+
         # Mode-specific controls
-        if self.mode == "text":
+        if self.mode == "text" and not self._is_tiling:
             self.text_input.draw(self.screen, self.font_sm)
             for ti in self.text_inputs:
                 ti.draw(self.screen, self.font_sm)
             self.font_sm.render_to(self.screen, (x, self._text_hint_y),
                                    "Click grid to place text", TEXT_DIM)
-        elif self.mode == "select":
+        elif self.mode == "select" and not self._is_tiling:
             hy = self._mode_controls_y
             if self.sel_state == "floating":
                 self.font_sm.render_to(self.screen, (x, hy),
@@ -1367,6 +2174,14 @@ class LifeApp:
                 self._sync_sliders()
                 return
 
+        # --- Rotation dial ---
+        if self.grid_type == "triangle" and self.tri_dial.hit(pos):
+            self.tri_dial.dragging = True
+            self.tri_dial.update_drag(pos)
+            self.tri_angle = self.tri_dial.value
+            self.slider_tri_angle.value = self.tri_angle
+            return
+
         # --- Buttons ---
         if self.btn_load.hit(pos):
             self._do_load_image(); return
@@ -1397,12 +2212,36 @@ class LifeApp:
         if self.btn_reapply.hit(pos):
             self._do_reapply_image(); return
 
+        # Grid type selector buttons
+        if self.btn_gt_sq.hit(pos):
+            self._set_grid_type("square"); return
+        if self.btn_gt_tri.hit(pos):
+            self._set_grid_type("triangle"); return
+        if self.btn_gt_cube.hit(pos):
+            self._set_grid_type("rhombus"); return
+        if self.btn_gt_pen.hit(pos):
+            self._set_grid_type("penrose"); return
+        if self.btn_gt_hex.hit(pos):
+            self._set_grid_type("hex"); return
+        if self.btn_gt_thex.hit(pos):
+            self._set_grid_type("trihex"); return
+        if self.btn_gt_oct.hit(pos):
+            self._set_grid_type("oct"); return
+        if self.btn_gt_vor.hit(pos):
+            self._set_grid_type("voronoi"); return
+
+        # Cube palette button
+        if self.grid_type == "rhombus" and self.btn_cube_palette.hit(pos):
+            self.cube_palette_idx = (self.cube_palette_idx + 1) % len(CUBE_PALETTES)
+            self.btn_cube_palette.text = f"Style: {CUBE_PALETTES[self.cube_palette_idx][0]}"
+            return
+
         # Mode selector buttons
         if self.btn_mode_draw.hit(pos):
             self._set_mode("draw"); return
-        if self.btn_mode_text.hit(pos):
+        if not self._is_tiling and self.btn_mode_text.hit(pos):
             self._set_mode("text"); return
-        if self.btn_mode_select.hit(pos):
+        if not self._is_tiling and self.btn_mode_select.hit(pos):
             self._set_mode("select"); return
 
         # --- Grid interactions based on mode ---
@@ -1415,9 +2254,14 @@ class LifeApp:
 
         if self.mode == "draw":
             self._cancel_pending()
-            r, c = p
-            self.draw_value = 0 if self.grid[r][c] else 1
-            self.grid[r][c] = self.draw_value
+            if self._is_tiling:
+                idx = p
+                self.draw_value = 0 if self.tiling_states[idx] else 1
+                self.tiling_states[idx] = self.draw_value
+            else:
+                r, c = p
+                self.draw_value = 0 if self.grid[r][c] else 1
+                self.grid[r][c] = self.draw_value
             self.drawing = True
 
         elif self.mode == "text":
@@ -1451,6 +2295,8 @@ class LifeApp:
         self.drawing = False
         for s in self.sliders:
             s.dragging = False
+        if self.grid_type == "triangle" and self.tri_dial.dragging:
+            self.tri_dial.dragging = False
 
         if self.mode == "select":
             if self.sel_state == "selecting":
@@ -1478,6 +2324,13 @@ class LifeApp:
             self._pan_anchor = pos
             return
 
+        # Rotation dial dragging
+        if self.grid_type == "triangle" and self.tri_dial.dragging:
+            self.tri_dial.update_drag(pos)
+            self.tri_angle = self.tri_dial.value
+            self.slider_tri_angle.value = self.tri_angle
+            return
+
         for b in self.buttons:
             b.update_hover(pos)
         for s in self.sliders:
@@ -1487,9 +2340,12 @@ class LifeApp:
         if self.mode == "draw":
             if self.drawing and buttons[0]:
                 p = self._pixel_at(*pos)
-                if p:
-                    r, c = p
-                    self.grid[r][c] = self.draw_value
+                if p is not None:
+                    if self._is_tiling:
+                        self.tiling_states[p] = self.draw_value
+                    else:
+                        r, c = p
+                        self.grid[r][c] = self.draw_value
 
         elif self.mode == "text":
             # Update text ghost preview position
@@ -1511,6 +2367,9 @@ class LifeApp:
         self.speed = self.slider_speed.value
         self.threshold = self.slider_thresh.value
         self.img_contrast = self.slider_contrast.value
+        if self.grid_type == "triangle":
+            self.tri_angle = self.slider_tri_angle.value
+            self.tri_dial.value = self.tri_angle
 
     def _sync_text_inputs(self):
         self.text_char_width = self.input_char_width.value
@@ -1580,14 +2439,24 @@ class LifeApp:
     def _is_computing(self):
         return self._pending_future is not None
 
+    @property
+    def _is_tiling(self):
+        return self.grid_type in ("rhombus", "penrose", "hex", "trihex",
+                                   "oct", "voronoi")
+
     # -----------------------------------------------------------------------
     # History (undo support)
     # -----------------------------------------------------------------------
 
     def _push_history(self):
-        self.history.append((copy_grid(self.grid), self.generation))
-        if len(self.history) > HISTORY_MAX:
-            self.history.pop(0)
+        if self._is_tiling:
+            self.tiling_history.append((list(self.tiling_states), self.generation))
+            if len(self.tiling_history) > HISTORY_MAX:
+                self.tiling_history.pop(0)
+        else:
+            self.history.append((copy_grid(self.grid), self.generation))
+            if len(self.history) > HISTORY_MAX:
+                self.history.pop(0)
 
     # -----------------------------------------------------------------------
     # Actions
@@ -1595,25 +2464,33 @@ class LifeApp:
 
     def _save_gen0(self):
         """Snapshot the current grid as generation 0 (if not already saved)."""
-        if self.gen0_grid is None or self.generation == 0:
-            self.gen0_grid = copy_grid(self.grid)
-            self.gen0_rows = self.grid_rows
-            self.gen0_cols = self.grid_cols
+        if self._is_tiling:
+            if self.gen0_grid is None or self.generation == 0:
+                self.gen0_grid = list(self.tiling_states)
+        else:
+            if self.gen0_grid is None or self.generation == 0:
+                self.gen0_grid = copy_grid(self.grid)
+                self.gen0_rows = self.grid_rows
+                self.gen0_cols = self.grid_cols
 
     def _do_reset(self):
         """Reset to the saved generation 0 state."""
         if self.gen0_grid is None:
             return
         self._cancel_pending()
-        self.grid_rows = self.gen0_rows
-        self.grid_cols = self.gen0_cols
-        self.grid = copy_grid(self.gen0_grid)
-        self.input_width.value = self.gen0_cols
-        self.input_width.text = str(self.gen0_cols)
-        self.input_height.value = self.gen0_rows
-        self.input_height.text = str(self.gen0_rows)
+        if self._is_tiling:
+            self.tiling_states = list(self.gen0_grid)
+            self.tiling_history.clear()
+        else:
+            self.grid_rows = self.gen0_rows
+            self.grid_cols = self.gen0_cols
+            self.grid = copy_grid(self.gen0_grid)
+            self.input_width.value = self.gen0_cols
+            self.input_width.text = str(self.gen0_cols)
+            self.input_height.value = self.gen0_rows
+            self.input_height.text = str(self.gen0_rows)
+            self.history.clear()
         self.generation = 0
-        self.history.clear()
 
     def _do_step(self):
         """Request a single step. Async for large grids, sync for small."""
@@ -1623,8 +2500,18 @@ class LifeApp:
         # Save gen 0 on the very first step
         self._save_gen0()
         self._push_history()
-        cells = self.grid_rows * self.grid_cols
 
+        if self._is_tiling:
+            self.tiling_states = step_tiling(self.tiling_states, self.tiling_nbrs)
+            self.generation += 1
+            return
+
+        if self.grid_type == "triangle":
+            self.grid = step_grid_tri(self.grid, wrap=self.wrap)
+            self.generation += 1
+            return
+
+        cells = self.grid_rows * self.grid_cols
         if cells <= ASYNC_THRESHOLD:
             # Small grid: compute inline (instant)
             self.grid = step_grid(self.grid, wrap=self.wrap)
@@ -1637,16 +2524,26 @@ class LifeApp:
                 _step_worker, data, self.grid_rows, self.grid_cols, self.wrap)
 
     def _do_back(self):
-        if not self.history:
-            return
-        self._cancel_pending()
-        self.grid, self.generation = self.history.pop()
+        if self._is_tiling:
+            if not self.tiling_history:
+                return
+            self._cancel_pending()
+            self.tiling_states, self.generation = self.tiling_history.pop()
+        else:
+            if not self.history:
+                return
+            self._cancel_pending()
+            self.grid, self.generation = self.history.pop()
 
     def _do_clear(self):
         self._cancel_pending()
-        self.grid = make_grid(self.grid_rows, self.grid_cols)
+        if self._is_tiling:
+            self.tiling_states = [0] * len(self.tiling_polys)
+            self.tiling_history.clear()
+        else:
+            self.grid = make_grid(self.grid_rows, self.grid_cols)
+            self.history.clear()
         self.generation = 0
-        self.history.clear()
         self.gen0_grid = None  # nothing to reset to
 
     def _do_apply_size(self):
@@ -1669,6 +2566,8 @@ class LifeApp:
                 self.grid[r][c] = old[r][c]
         self.generation = 0
         self.history.clear()
+        if self._is_tiling:
+            self._generate_tiling()
 
     # -----------------------------------------------------------------------
     # Swap operations
@@ -1676,9 +2575,12 @@ class LifeApp:
 
     def _do_swap_live(self):
         self._cancel_pending()
-        for r in range(self.grid_rows):
-            for c in range(self.grid_cols):
-                self.grid[r][c] = 1 - self.grid[r][c]
+        if self._is_tiling:
+            self.tiling_states = [1 - s for s in self.tiling_states]
+        else:
+            for r in range(self.grid_rows):
+                for c in range(self.grid_cols):
+                    self.grid[r][c] = 1 - self.grid[r][c]
         self.alive_is_light = not self.alive_is_light
 
     def _do_swap_colors(self):
@@ -1812,7 +2714,8 @@ class LifeApp:
                     if self.play_direction == 1:
                         self._do_step()
                     else:
-                        if self.history:
+                        has_hist = self.tiling_history if self._is_tiling else self.history
+                        if has_hist:
                             self._do_back()
                         else:
                             self.running = False  # nothing left to rewind
