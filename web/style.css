@@ -294,12 +294,17 @@ button.full {
   display: grid;
   grid-template-columns: 1fr 1fr auto;
   gap: 8px;
-  align-items: end;
+  align-items: stretch;
 }
 
 .field.checkbox {
-  justify-items: start;
-  align-content: space-between;
+  grid-template-rows: auto 1fr;
+  padding-top: 3px;
+}
+
+.field.checkbox input[type="checkbox"] {
+  justify-self: center;
+  align-self: center;
 }
 
 input[type="number"],
