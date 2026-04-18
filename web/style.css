@@ -139,6 +139,8 @@ body.sidebar-collapsed .sidebar {
   flex-direction: column;
   gap: 10px;
   overflow-y: auto;
+  overflow-x: visible;
+  position: relative;
 }
 
 .sidebar-top {
@@ -242,19 +244,23 @@ button.has-tooltip {
 .tooltip-text {
   display: none;
   position: absolute;
-  bottom: 100%;
+  top: 100%;
   left: 50%;
-  transform: translateX(-50%) translateY(-4px);
+  transform: translateX(-50%);
   background: var(--ink);
   color: var(--bg);
-  padding: 6px 8px;
+  padding: 8px 10px;
   border-radius: var(--radius);
   font-size: 0.7rem;
   font-weight: 400;
-  white-space: nowrap;
+  white-space: normal;
+  max-width: 200px;
   letter-spacing: 0;
   text-transform: none;
-  z-index: 10;
+  z-index: 1000;
+  margin-top: 4px;
+  line-height: 1.4;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 }
 
 button.has-tooltip:hover .tooltip-text {
@@ -402,22 +408,26 @@ input[type="checkbox"] {
 .info-btn::after {
   content: attr(data-tooltip);
   position: absolute;
-  bottom: 100%;
+  top: 100%;
   left: 50%;
-  transform: translateX(-50%) translateY(-4px);
+  transform: translateX(-50%);
   background: var(--ink);
   color: var(--bg);
-  padding: 6px 8px;
+  padding: 8px 10px;
   border-radius: var(--radius);
   font-size: 0.7rem;
   font-weight: 400;
-  white-space: nowrap;
+  white-space: normal;
+  max-width: 200px;
   letter-spacing: 0;
   text-transform: none;
   opacity: 0;
   pointer-events: none;
   transition: opacity 120ms ease;
-  z-index: 10;
+  z-index: 1000;
+  margin-top: 4px;
+  line-height: 1.4;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 }
 
 .info-btn:hover::after,
