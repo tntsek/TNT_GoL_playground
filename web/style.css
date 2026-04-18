@@ -235,6 +235,32 @@ button.primary:hover {
   border-color: var(--accent-strong);
 }
 
+button.has-tooltip {
+  position: relative;
+}
+
+.tooltip-text {
+  display: none;
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%) translateY(-4px);
+  background: var(--ink);
+  color: var(--bg);
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  font-size: 0.7rem;
+  font-weight: 400;
+  white-space: nowrap;
+  letter-spacing: 0;
+  text-transform: none;
+  z-index: 10;
+}
+
+button.has-tooltip:hover .tooltip-text {
+  display: block;
+}
+
 button.full {
   width: 100%;
   padding: 11px 12px;
@@ -345,6 +371,58 @@ input[type="checkbox"] {
   font-variant-numeric: tabular-nums;
   letter-spacing: 0;
   color: var(--ink);
+}
+
+.info-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  min-height: unset;
+  padding: 0;
+  margin: 0 2px;
+  border: 1px solid var(--ink-soft);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 0.65rem;
+  font-weight: 700;
+  cursor: help;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+  position: relative;
+}
+
+.info-btn:hover {
+  color: var(--ink);
+  border-color: var(--ink);
+  background: var(--panel-hover);
+}
+
+.info-btn::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%) translateY(-4px);
+  background: var(--ink);
+  color: var(--bg);
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  font-size: 0.7rem;
+  font-weight: 400;
+  white-space: nowrap;
+  letter-spacing: 0;
+  text-transform: none;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+  z-index: 10;
+}
+
+.info-btn:hover::after,
+.info-btn:focus::after {
+  opacity: 1;
 }
 
 input[type="range"] {

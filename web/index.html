@@ -87,19 +87,19 @@
 
           <div class="button-row">
             <button id="apply-size">Apply Size</button>
-            <button id="rebuild-map">Rebuild</button>
+            <button id="rebuild-map" class="has-tooltip">Rebuild <span class="tooltip-text">Randomizes polygon positions for Voronoi grids; redraws the tiling for other geometries.</span></button>
           </div>
 
           <label class="range">
-            <span>Speed <strong id="speed-value">8</strong>/s</span>
+            <span>Speed <strong id="speed-value">8</strong> gen/s <button type="button" class="info-btn" data-tooltip="Generations per second — how fast the simulation steps.">?</button></span>
             <input id="speed-input" type="range" min="1" max="24" value="8" />
           </label>
           <label class="range">
-            <span>Density <strong id="density-value">28%</strong></span>
+            <span>Density <strong id="density-value">28%</strong> <button type="button" class="info-btn" data-tooltip="Percentage of cells to randomly fill when using Randomize.">?</button></span>
             <input id="density-input" type="range" min="5" max="95" value="28" />
           </label>
           <label class="range">
-            <span>Threshold <strong id="threshold-value">140</strong></span>
+            <span>Threshold <strong id="threshold-value">140</strong> <button type="button" class="info-btn" data-tooltip="Brightness cutoff (0–255) when importing images. Pixels darker than this become live cells.">?</button></span>
             <input id="threshold-input" type="range" min="0" max="255" value="140" />
           </label>
 
