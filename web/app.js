@@ -1098,4 +1098,55 @@ window.addEventListener("beforeunload", () => {
   window.cancelAnimationFrame(animationFrame);
 });
 
+// ─── Floating tooltip ────────────────────────────────────────────────────────
+(function initTooltips() {
+  const tip = document.createElement("div");
+  tip.id = "floating-tooltip";
+  document.body.appendChild(tip);
+
+  function show(text, anchorRect) {
+    tip.textContent = text;
+    tip.classList.remove("visible");
+    // Force layout so we get real dimensions before positioning
+    tip.style.left = "-9999px";
+    tip.style.top = "-9999px";
+    tip.style.display = "block";
+
+    const tw = tip.offsetWidth;
+    const th = tip.offsetHeight;
+    const margin = 8;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+
+    // Try left of anchor; fall back to right
+    let left = anchorRect.left - tw - margin;
+    if (left < margin) {
+      left = anchorRect.right + margin;
+    }
+    // Clamp right edge
+    if (left + tw > vw - margin) {
+      left = vw - margin - tw;
+    }
+
+    // Vertically center on anchor, clamped to viewport
+    let top = anchorRect.top + (anchorRect.height - th) / 2;
+    top = Math.max(margin, Math.min(top, vh - margin - th));
+
+    tip.style.left = `${left}px`;
+    tip.style.top = `${top}px`;
+    tip.classList.add("visible");
+  }
+
+  function hide() {
+    tip.classList.remove("visible");
+  }
+
+  document.querySelectorAll("[data-tooltip]").forEach((el) => {
+    el.addEventListener("mouseenter", () => show(el.dataset.tooltip, el.getBoundingClientRect()));
+    el.addEventListener("mouseleave", hide);
+    el.addEventListener("focus", () => show(el.dataset.tooltip, el.getBoundingClientRect()));
+    el.addEventListener("blur", hide);
+  });
+}());
+
 init();

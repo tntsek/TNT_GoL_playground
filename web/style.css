@@ -237,34 +237,26 @@ button.primary:hover {
   border-color: var(--accent-strong);
 }
 
-button.has-tooltip {
-  position: relative;
-}
-
-.tooltip-text {
-  display: none;
-  position: absolute;
-  top: 100%;
-  left: 50%;
-  transform: translateX(-50%);
-  background: var(--ink);
-  color: var(--bg);
+/* Tooltip element appended to body by JS */
+#floating-tooltip {
+  position: fixed;
+  z-index: 9999;
+  max-width: 220px;
   padding: 8px 10px;
   border-radius: var(--radius);
-  font-size: 0.7rem;
+  background: var(--ink);
+  color: var(--bg);
+  font-size: 0.72rem;
   font-weight: 400;
-  white-space: normal;
-  max-width: 200px;
-  letter-spacing: 0;
-  text-transform: none;
-  z-index: 1000;
-  margin-top: 4px;
-  line-height: 1.4;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  line-height: 1.45;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 100ms ease;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.22);
 }
 
-button.has-tooltip:hover .tooltip-text {
-  display: block;
+#floating-tooltip.visible {
+  opacity: 1;
 }
 
 button.full {
@@ -396,43 +388,12 @@ input[type="checkbox"] {
   font-weight: 700;
   cursor: help;
   transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
-  position: relative;
 }
 
 .info-btn:hover {
   color: var(--ink);
   border-color: var(--ink);
   background: var(--panel-hover);
-}
-
-.info-btn::after {
-  content: attr(data-tooltip);
-  position: absolute;
-  top: 100%;
-  left: 50%;
-  transform: translateX(-50%);
-  background: var(--ink);
-  color: var(--bg);
-  padding: 8px 10px;
-  border-radius: var(--radius);
-  font-size: 0.7rem;
-  font-weight: 400;
-  white-space: normal;
-  max-width: 200px;
-  letter-spacing: 0;
-  text-transform: none;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 120ms ease;
-  z-index: 1000;
-  margin-top: 4px;
-  line-height: 1.4;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-}
-
-.info-btn:hover::after,
-.info-btn:focus::after {
-  opacity: 1;
 }
 
 input[type="range"] {
