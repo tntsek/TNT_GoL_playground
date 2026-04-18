@@ -298,10 +298,7 @@ button.full {
 }
 
 .field.checkbox {
-  grid-template-columns: auto;
   justify-items: start;
-  align-items: center;
-  gap: 4px;
 }
 
 input[type="number"],
@@ -329,20 +326,8 @@ select {
 input[type="checkbox"] {
   width: 16px;
   height: 16px;
-  margin: 0;
+  margin-top: 8px;
   accent-color: var(--accent-cool);
-}
-
-.field.checkbox {
-  padding-bottom: 4px;
-}
-
-.field.checkbox span {
-  order: 2;
-}
-
-.field.checkbox input {
-  order: 1;
 }
 
 /* Ranges */
