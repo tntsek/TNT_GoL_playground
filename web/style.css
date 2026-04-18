@@ -299,6 +299,7 @@ button.full {
 
 .field.checkbox {
   justify-items: start;
+  align-content: space-between;
 }
 
 input[type="number"],
@@ -326,7 +327,7 @@ select {
 input[type="checkbox"] {
   width: 16px;
   height: 16px;
-  margin-top: 8px;
+  margin: 0;
   accent-color: var(--accent-cool);
 }
 
