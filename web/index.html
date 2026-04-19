@@ -90,6 +90,22 @@
             <button id="rebuild-map" data-tooltip="Randomizes polygon positions for Voronoi grids; redraws the tiling for other geometries.">Rebuild</button>
           </div>
 
+          <div id="voronoi-options" class="voronoi-options" hidden>
+            <div class="section-title">Voronoi</div>
+            <div class="button-row">
+              <button id="voronoi-euclid" class="seg-btn" data-tooltip="Straight-line distance. Cells have straight bisector edges.">Euclidean</button>
+              <button id="voronoi-manhattan" class="seg-btn" data-tooltip="Taxicab distance |dx|+|dy|. Cells have blocky, axis-aligned L-shaped edges.">Manhattan</button>
+            </div>
+            <label class="range">
+              <span>Jitter <strong id="voronoi-jitter-value">70%</strong> <button type="button" class="info-btn" data-tooltip="0% = seeds on a regular grid (lattice Voronoi). 100% = seeds placed fully randomly within each cell.">?</button></span>
+              <input id="voronoi-jitter" type="range" min="0" max="100" value="70" />
+            </label>
+            <label class="range">
+              <span>Cell size <strong id="voronoi-density-value">4</strong> <button type="button" class="info-btn" data-tooltip="Higher = more, smaller cells. Lower = fewer, bigger cells. Computed as rows ÷ value.">?</button></span>
+              <input id="voronoi-density" type="range" min="2" max="10" value="4" />
+            </label>
+          </div>
+
           <label class="range">
             <span>Speed <strong id="speed-value">8</strong> gen/s <button type="button" class="info-btn" data-tooltip="Generations per second — how fast the simulation steps.">?</button></span>
             <input id="speed-input" type="range" min="1" max="24" value="8" />

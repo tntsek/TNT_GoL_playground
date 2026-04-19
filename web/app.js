@@ -45,6 +45,13 @@ const elements = {
   snapshotImage: document.querySelector("#snapshot-image"),
   sidebarHide: document.querySelector("#sidebar-hide"),
   sidebarShow: document.querySelector("#sidebar-show"),
+  voronoiOptions: document.querySelector("#voronoi-options"),
+  voronoiEuclid: document.querySelector("#voronoi-euclid"),
+  voronoiManhattan: document.querySelector("#voronoi-manhattan"),
+  voronoiJitter: document.querySelector("#voronoi-jitter"),
+  voronoiJitterValue: document.querySelector("#voronoi-jitter-value"),
+  voronoiDensity: document.querySelector("#voronoi-density"),
+  voronoiDensityValue: document.querySelector("#voronoi-density-value"),
 };
 
 const state = {
@@ -64,6 +71,9 @@ const state = {
   tilingFaceTypes: [],
   tilingBBox: [1, 1],
   voronoiSeed: 42,
+  voronoiMetric: "euclidean",
+  voronoiJitter: 0.7,
+  voronoiDensity: 4,
   sidebarOpen: window.innerWidth > 720,
 };
 
@@ -476,30 +486,35 @@ function mulberry32(seed) {
   };
 }
 
-function generateVoronoiTiling(rows, cols, seed = 42) {
+function generateVoronoiTiling(rows, cols, seed = 42, metric = "euclidean", jitter = 0.7) {
   const rng = mulberry32(seed);
   const seeds = [];
+  const j = Math.max(0, Math.min(1, jitter));
+  const margin = (1 - j) / 2;
   for (let row = 0; row < rows; row += 1) {
     for (let col = 0; col < cols; col += 1) {
-      seeds.push([col + 0.15 + 0.7 * rng(), row + 0.15 + 0.7 * rng()]);
+      seeds.push([col + margin + j * rng(), row + margin + j * rng()]);
     }
+  }
+  const box = [-0.3, -0.3, cols - 0.7, rows - 0.7];
+
+  if (metric === "manhattan") {
+    return generateManhattanVoronoi(seeds, box, rows, cols);
   }
 
   const polys = [];
   const faceTypes = [];
-  const box = [-0.3, -0.3, cols - 0.7, rows - 0.7];
-
   for (let i = 0; i < seeds.length; i += 1) {
     const [sx, sy] = seeds[i];
     let cell = [
       [box[0], box[1]], [box[2], box[1]],
       [box[2], box[3]], [box[0], box[3]],
     ];
-    for (let j = 0; j < seeds.length; j += 1) {
-      if (i === j) {
+    for (let k = 0; k < seeds.length; k += 1) {
+      if (i === k) {
         continue;
       }
-      const [tx, ty] = seeds[j];
+      const [tx, ty] = seeds[k];
       if ((tx - sx) ** 2 + (ty - sy) ** 2 > 25) {
         continue;
       }
@@ -520,6 +535,198 @@ function generateVoronoiTiling(rows, cols, seed = 42) {
 
   const [normalized, bbox] = normalizeTiling(polys);
   return [normalized, faceTypes, bbox];
+}
+
+function generateManhattanVoronoi(seeds, box, rows, cols) {
+  // Rasterize the diagram on a fine grid and trace each cell's outline.
+  // Manhattan bisectors are L-shaped so half-plane clipping doesn't apply.
+  const [x0, y0, x1, y1] = box;
+  const W = x1 - x0;
+  const H = y1 - y0;
+  // Resolution: aim for ~12 pixels per cell side, capped at 220 on the larger axis.
+  const perUnit = Math.min(22, Math.max(8, Math.round(260 / Math.max(rows, cols))));
+  const pw = Math.max(8, Math.min(260, Math.ceil(W * perUnit)));
+  const ph = Math.max(8, Math.min(260, Math.ceil(H * perUnit)));
+  const cw = W / pw;
+  const ch = H / ph;
+  const grid = new Int32Array(pw * ph);
+  // Each pixel: find nearest seed under Manhattan distance.
+  for (let py = 0; py < ph; py += 1) {
+    const y = y0 + (py + 0.5) * ch;
+    for (let px = 0; px < pw; px += 1) {
+      const x = x0 + (px + 0.5) * cw;
+      let bestI = 0;
+      let bestD = Infinity;
+      for (let i = 0; i < seeds.length; i += 1) {
+        const d = Math.abs(x - seeds[i][0]) + Math.abs(y - seeds[i][1]);
+        if (d < bestD) {
+          bestD = d;
+          bestI = i;
+        }
+      }
+      grid[py * pw + px] = bestI;
+    }
+  }
+
+  const polys = [];
+  const faceTypes = [];
+  for (let i = 0; i < seeds.length; i += 1) {
+    const poly = traceRegionOutline(grid, pw, ph, i, x0, y0, cw, ch);
+    if (poly && poly.length >= 3) {
+      polys.push(poly);
+      const [sx, sy] = seeds[i];
+      const dist = Math.abs(sx - cols / 2) + Math.abs(sy - rows / 2);
+      faceTypes.push(Math.floor(dist) % 3);
+    }
+  }
+
+  const [normalized, bbox] = normalizeTiling(polys);
+  return [normalized, faceTypes, bbox];
+}
+
+function traceRegionOutline(grid, pw, ph, seedIdx, x0, y0, cw, ch) {
+  // For each pixel in the region, emit boundary edges on sides where the
+  // neighbor is out of bounds or a different region. Edges are oriented CW
+  // around their pixel (in screen-space, y-down), so the region's outer
+  // boundary forms a CW loop with interior on the right.
+  const edges = [];
+  const keyOf = (x, y) => `${Math.round(x * 10000)}|${Math.round(y * 10000)}`;
+  for (let py = 0; py < ph; py += 1) {
+    for (let px = 0; px < pw; px += 1) {
+      if (grid[py * pw + px] !== seedIdx) {
+        continue;
+      }
+      const x = x0 + px * cw;
+      const y = y0 + py * ch;
+      const xr = x + cw;
+      const yb = y + ch;
+      if (py === 0 || grid[(py - 1) * pw + px] !== seedIdx) {
+        edges.push([x, y, xr, y]);
+      }
+      if (px === pw - 1 || grid[py * pw + (px + 1)] !== seedIdx) {
+        edges.push([xr, y, xr, yb]);
+      }
+      if (py === ph - 1 || grid[(py + 1) * pw + px] !== seedIdx) {
+        edges.push([xr, yb, x, yb]);
+      }
+      if (px === 0 || grid[py * pw + (px - 1)] !== seedIdx) {
+        edges.push([x, yb, x, y]);
+      }
+    }
+  }
+  if (edges.length === 0) {
+    return null;
+  }
+  // Multimap from each edge's start corner to the list of edges starting there.
+  // At diagonal-touch pinch points, two edges can share a start corner.
+  const byStart = new Map();
+  for (const e of edges) {
+    const k = keyOf(e[0], e[1]);
+    let arr = byStart.get(k);
+    if (!arr) {
+      arr = [];
+      byStart.set(k, arr);
+    }
+    arr.push(e);
+  }
+  const takeEdge = (key, prevDX, prevDY) => {
+    const arr = byStart.get(key);
+    if (!arr || arr.length === 0) {
+      return null;
+    }
+    // At a fork, prefer the right-most (clockwise-most) turn to stay on the
+    // outer boundary of the current simply-connected piece. With y-down coords
+    // a right turn corresponds to cross > 0.
+    let bestIdx = 0;
+    if (arr.length > 1 && prevDX !== undefined) {
+      let bestScore = -Infinity;
+      for (let i = 0; i < arr.length; i += 1) {
+        const e = arr[i];
+        const dx = e[2] - e[0];
+        const dy = e[3] - e[1];
+        const cross = prevDX * dy - prevDY * dx;
+        const dot = prevDX * dx + prevDY * dy;
+        let score;
+        if (cross > 1e-9) {
+          score = 3; // right turn
+        } else if (cross < -1e-9) {
+          score = 0; // left turn
+        } else if (dot > 0) {
+          score = 2; // straight
+        } else {
+          score = 1; // U-turn
+        }
+        if (score > bestScore) {
+          bestScore = score;
+          bestIdx = i;
+        }
+      }
+    }
+    const picked = arr.splice(bestIdx, 1)[0];
+    if (arr.length === 0) {
+      byStart.delete(key);
+    }
+    return picked;
+  };
+
+  // Walk the outer loop starting from the top-left-most edge corner. That
+  // guarantees we begin on the outer boundary rather than an inner hole.
+  let startIdx = 0;
+  for (let i = 1; i < edges.length; i += 1) {
+    const e = edges[i];
+    const s = edges[startIdx];
+    if (e[1] < s[1] - 1e-9 || (Math.abs(e[1] - s[1]) < 1e-9 && e[0] < s[0])) {
+      startIdx = i;
+    }
+  }
+  const start = edges[startIdx];
+  // Remove start from map
+  takeEdge(keyOf(start[0], start[1]));
+  const loop = [[start[0], start[1]]];
+  let cur = start;
+  for (let iter = 0; iter < edges.length + 4; iter += 1) {
+    const prevDX = cur[2] - cur[0];
+    const prevDY = cur[3] - cur[1];
+    const endKey = keyOf(cur[2], cur[3]);
+    const startKey = keyOf(start[0], start[1]);
+    if (endKey === startKey) {
+      // Closed loop back to start corner
+      break;
+    }
+    const next = takeEdge(endKey, prevDX, prevDY);
+    if (!next) {
+      loop.push([cur[2], cur[3]]);
+      break;
+    }
+    loop.push([next[0], next[1]]);
+    cur = next;
+  }
+  return simplifyPolygon(loop);
+}
+
+function simplifyPolygon(poly) {
+  if (poly.length < 3) {
+    return poly;
+  }
+  const out = [];
+  const n = poly.length;
+  const EPS = 1e-7;
+  for (let i = 0; i < n; i += 1) {
+    const prev = poly[(i - 1 + n) % n];
+    const cur = poly[i];
+    const next = poly[(i + 1) % n];
+    // Drop consecutive duplicates
+    if (Math.abs(cur[0] - prev[0]) < EPS && Math.abs(cur[1] - prev[1]) < EPS) {
+      continue;
+    }
+    // Drop colinear midpoint
+    const cross = (cur[0] - prev[0]) * (next[1] - prev[1]) - (cur[1] - prev[1]) * (next[0] - prev[0]);
+    if (Math.abs(cross) < EPS) {
+      continue;
+    }
+    out.push(cur);
+  }
+  return out.length >= 3 ? out : poly;
 }
 
 function rebuildTopology() {
@@ -555,10 +762,13 @@ function rebuildTopology() {
         Math.max(3, Math.floor(state.cols / 4)),
       );
     } else {
+      const div = Math.max(1, state.voronoiDensity);
       [polys, faceTypes, bbox] = generateVoronoiTiling(
-        Math.max(4, Math.floor(state.rows / 4)),
-        Math.max(4, Math.floor(state.cols / 4)),
+        Math.max(3, Math.floor(state.rows / div)),
+        Math.max(3, Math.floor(state.cols / div)),
         state.voronoiSeed,
+        state.voronoiMetric,
+        state.voronoiJitter,
       );
     }
     state.polygons = polys;
@@ -808,6 +1018,19 @@ function syncLabels() {
   elements.speedValue.textContent = String(state.speed);
   elements.densityValue.textContent = `${Math.round(state.density * 100)}%`;
   elements.thresholdValue.textContent = String(state.threshold);
+  syncVoronoiUI();
+}
+
+function syncVoronoiUI() {
+  if (!elements.voronoiOptions) {
+    return;
+  }
+  const show = state.gridType === "voronoi";
+  elements.voronoiOptions.hidden = !show;
+  elements.voronoiJitterValue.textContent = `${Math.round(state.voronoiJitter * 100)}%`;
+  elements.voronoiDensityValue.textContent = String(state.voronoiDensity);
+  elements.voronoiEuclid.classList.toggle("active", state.voronoiMetric === "euclidean");
+  elements.voronoiManhattan.classList.toggle("active", state.voronoiMetric === "manhattan");
 }
 
 function pointerPosition(event) {
@@ -1041,6 +1264,46 @@ function bindEvents() {
     }
     rebuildTopology();
   });
+  elements.voronoiEuclid.addEventListener("click", () => {
+    state.voronoiMetric = "euclidean";
+    if (state.gridType === "voronoi") {
+      rebuildTopology();
+    } else {
+      syncVoronoiUI();
+    }
+  });
+  elements.voronoiManhattan.addEventListener("click", () => {
+    state.voronoiMetric = "manhattan";
+    if (state.gridType === "voronoi") {
+      rebuildTopology();
+    } else {
+      syncVoronoiUI();
+    }
+  });
+  elements.voronoiJitter.addEventListener("change", (event) => {
+    state.voronoiJitter = Number(event.target.value) / 100;
+    if (state.gridType === "voronoi") {
+      rebuildTopology();
+    } else {
+      syncVoronoiUI();
+    }
+  });
+  elements.voronoiJitter.addEventListener("input", (event) => {
+    state.voronoiJitter = Number(event.target.value) / 100;
+    syncVoronoiUI();
+  });
+  elements.voronoiDensity.addEventListener("change", (event) => {
+    state.voronoiDensity = Number(event.target.value);
+    if (state.gridType === "voronoi") {
+      rebuildTopology();
+    } else {
+      syncVoronoiUI();
+    }
+  });
+  elements.voronoiDensity.addEventListener("input", (event) => {
+    state.voronoiDensity = Number(event.target.value);
+    syncVoronoiUI();
+  });
   elements.speedInput.addEventListener("input", (event) => {
     state.speed = Number(event.target.value);
     syncLabels();
@@ -1086,6 +1349,8 @@ function init() {
   elements.gridType.value = state.gridType;
   elements.rowsInput.value = String(state.rows);
   elements.colsInput.value = String(state.cols);
+  elements.voronoiJitter.value = String(Math.round(state.voronoiJitter * 100));
+  elements.voronoiDensity.value = String(state.voronoiDensity);
   syncSidebar();
   bindEvents();
   rebuildTopology();
