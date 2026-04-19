@@ -543,14 +543,20 @@ function generateVoronoiTiling(rows, cols, seed = 42, metric = "euclidean", jitt
 
 function generateManhattanVoronoi(seeds, box, rows, cols) {
   // Rasterize the diagram on a fine grid and trace each cell's outline.
-  // Manhattan bisectors are L-shaped so half-plane clipping doesn't apply.
+  // Manhattan bisectors are piecewise-linear (axis-aligned + 45°) so
+  // half-plane clipping doesn't apply directly. We raster-sample then
+  // simplify the traced staircase back into its underlying straight lines.
   const [x0, y0, x1, y1] = box;
   const W = x1 - x0;
   const H = y1 - y0;
-  // Resolution: aim for ~12 pixels per cell side, capped at 220 on the larger axis.
-  const perUnit = Math.min(22, Math.max(8, Math.round(260 / Math.max(rows, cols))));
-  const pw = Math.max(8, Math.min(260, Math.ceil(W * perUnit)));
-  const ph = Math.max(8, Math.min(260, Math.ceil(H * perUnit)));
+  // Budget total work ~80M pixel-seed comparisons. Scale raster resolution
+  // with seed count: more seeds -> lower per-axis resolution per seed.
+  const totalBudget = 80_000_000;
+  const maxSideBySeeds = Math.floor(Math.sqrt(totalBudget / Math.max(1, seeds.length)));
+  const maxSide = Math.max(120, Math.min(640, maxSideBySeeds));
+  const perUnit = Math.max(6, Math.floor(maxSide / Math.max(W, H)));
+  const pw = Math.min(maxSide, Math.max(16, Math.ceil(W * perUnit)));
+  const ph = Math.min(maxSide, Math.max(16, Math.ceil(H * perUnit)));
   const cw = W / pw;
   const ch = H / ph;
   const grid = new Int32Array(pw * ph);
@@ -572,10 +578,17 @@ function generateManhattanVoronoi(seeds, box, rows, cols) {
     }
   }
 
+  // Simplification tolerance: just over half a pixel diagonal so staircase
+  // approximations of a true 45° line collapse into one segment, but real
+  // axis-aligned or diagonal bisector segments (length >= cell spacing)
+  // stay intact.
+  const eps = Math.max(cw, ch) * 0.75;
+
   const polys = [];
   const faceTypes = [];
   for (let i = 0; i < seeds.length; i += 1) {
-    const poly = traceRegionOutline(grid, pw, ph, i, x0, y0, cw, ch);
+    const raw = traceRegionOutline(grid, pw, ph, i, x0, y0, cw, ch);
+    const poly = raw ? simplifyClosedPolygon(raw, eps) : null;
     if (poly && poly.length >= 3) {
       polys.push(poly);
       const [sx, sy] = seeds[i];
@@ -731,6 +744,73 @@ function simplifyPolygon(poly) {
     out.push(cur);
   }
   return out.length >= 3 ? out : poly;
+}
+
+// Ramer-Douglas-Peucker on an open chain. Returns kept points in order.
+function rdpOpen(points, epsSq) {
+  if (points.length < 3) {
+    return points.slice();
+  }
+  const keep = new Array(points.length).fill(false);
+  keep[0] = true;
+  keep[points.length - 1] = true;
+  const stack = [[0, points.length - 1]];
+  while (stack.length) {
+    const [lo, hi] = stack.pop();
+    if (hi - lo < 2) continue;
+    const a = points[lo];
+    const b = points[hi];
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const denom = dx * dx + dy * dy;
+    let maxD = 0;
+    let idx = -1;
+    for (let i = lo + 1; i < hi; i += 1) {
+      const ex = points[i][0] - a[0];
+      const ey = points[i][1] - a[1];
+      let d;
+      if (denom === 0) {
+        d = ex * ex + ey * ey;
+      } else {
+        const num = ex * dy - ey * dx;
+        d = (num * num) / denom;
+      }
+      if (d > maxD) {
+        maxD = d;
+        idx = i;
+      }
+    }
+    if (idx >= 0 && maxD > epsSq) {
+      keep[idx] = true;
+      stack.push([lo, idx]);
+      stack.push([idx, hi]);
+    }
+  }
+  const result = [];
+  for (let i = 0; i < points.length; i += 1) {
+    if (keep[i]) result.push(points[i]);
+  }
+  return result;
+}
+
+// RDP on a closed polygon. Splits the loop into two open chains so RDP
+// has stable anchor endpoints, then stitches the two simplified halves.
+function simplifyClosedPolygon(points, eps) {
+  if (!points || points.length < 4) {
+    return points ? points.slice() : [];
+  }
+  const epsSq = eps * eps;
+  const n = points.length;
+  const mid = Math.floor(n / 2);
+  const chain1 = points.slice(0, mid + 1);
+  const chain2 = points.slice(mid).concat([points[0]]);
+  const s1 = rdpOpen(chain1, epsSq);
+  const s2 = rdpOpen(chain2, epsSq);
+  // s1 ends at points[mid], s2 starts at points[mid] and ends at points[0];
+  // drop the duplicated join points.
+  const merged = s1.slice(0, -1).concat(s2.slice(0, -1));
+  // Final pass: drop colinear/duplicate artifacts at the seams.
+  return simplifyPolygon(merged);
 }
 
 function rebuildTopology() {
