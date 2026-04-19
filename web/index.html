@@ -79,11 +79,11 @@
           <div class="field-row">
             <label class="field">
               <span>Rows</span>
-              <input id="rows-input" type="number" min="8" max="180" value="64" />
+              <input id="rows-input" type="number" min="4" max="1000" value="64" />
             </label>
             <label class="field">
               <span>Cols</span>
-              <input id="cols-input" type="number" min="8" max="180" value="64" />
+              <input id="cols-input" type="number" min="4" max="1000" value="64" />
             </label>
             <label class="field checkbox">
               <span>Wrap</span>
@@ -105,10 +105,6 @@
             <label class="range">
               <span>Jitter <strong id="voronoi-jitter-value">70%</strong> <button type="button" class="info-btn" data-tooltip="0% = seeds on a regular grid (lattice Voronoi). 100% = seeds placed fully randomly within each cell.">?</button></span>
               <input id="voronoi-jitter" type="range" min="0" max="100" value="70" />
-            </label>
-            <label class="range">
-              <span>Cell size <strong id="voronoi-density-value">4</strong> <button type="button" class="info-btn" data-tooltip="Higher = more, smaller cells. Lower = fewer, bigger cells. Computed as rows ÷ value.">?</button></span>
-              <input id="voronoi-density" type="range" min="2" max="10" value="4" />
             </label>
           </div>
 

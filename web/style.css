@@ -474,6 +474,10 @@ input[type="file"]::file-selector-button {
   background: var(--panel);
 }
 
+.voronoi-options[hidden] {
+  display: none;
+}
+
 .voronoi-options .section-title {
   font-size: 11px;
   font-weight: 600;

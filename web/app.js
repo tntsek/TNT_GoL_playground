@@ -53,8 +53,6 @@ const elements = {
   voronoiManhattan: document.querySelector("#voronoi-manhattan"),
   voronoiJitter: document.querySelector("#voronoi-jitter"),
   voronoiJitterValue: document.querySelector("#voronoi-jitter-value"),
-  voronoiDensity: document.querySelector("#voronoi-density"),
-  voronoiDensityValue: document.querySelector("#voronoi-density-value"),
 };
 
 const state = {
@@ -76,7 +74,6 @@ const state = {
   voronoiSeed: 42,
   voronoiMetric: "euclidean",
   voronoiJitter: 0.7,
-  voronoiDensity: 4,
   sidebarOpen: window.innerWidth > 720,
   colorsSwapped: false,
   history: [],
@@ -769,10 +766,9 @@ function rebuildTopology() {
         Math.max(3, Math.floor(state.cols / 4)),
       );
     } else {
-      const div = Math.max(1, state.voronoiDensity);
       [polys, faceTypes, bbox] = generateVoronoiTiling(
-        Math.max(3, Math.floor(state.rows / div)),
-        Math.max(3, Math.floor(state.cols / div)),
+        Math.max(3, Math.floor(state.rows / 4)),
+        Math.max(3, Math.floor(state.cols / 4)),
         state.voronoiSeed,
         state.voronoiMetric,
         state.voronoiJitter,
@@ -1116,7 +1112,6 @@ function syncVoronoiUI() {
   const show = state.gridType === "voronoi";
   elements.voronoiOptions.hidden = !show;
   elements.voronoiJitterValue.textContent = `${Math.round(state.voronoiJitter * 100)}%`;
-  elements.voronoiDensityValue.textContent = String(state.voronoiDensity);
   elements.voronoiEuclid.classList.toggle("active", state.voronoiMetric === "euclidean");
   elements.voronoiManhattan.classList.toggle("active", state.voronoiMetric === "manhattan");
 }
@@ -1349,8 +1344,8 @@ function bindEvents() {
     rebuildTopology();
   });
   elements.applySize.addEventListener("click", () => {
-    state.rows = clamp(Number(elements.rowsInput.value) || 64, 8, 180);
-    state.cols = clamp(Number(elements.colsInput.value) || 64, 8, 180);
+    state.rows = clamp(Number(elements.rowsInput.value) || 64, 4, 1000);
+    state.cols = clamp(Number(elements.colsInput.value) || 64, 4, 1000);
     elements.rowsInput.value = String(state.rows);
     elements.colsInput.value = String(state.cols);
     rebuildTopology();
@@ -1387,18 +1382,6 @@ function bindEvents() {
   });
   elements.voronoiJitter.addEventListener("input", (event) => {
     state.voronoiJitter = Number(event.target.value) / 100;
-    syncVoronoiUI();
-  });
-  elements.voronoiDensity.addEventListener("change", (event) => {
-    state.voronoiDensity = Number(event.target.value);
-    if (state.gridType === "voronoi") {
-      rebuildTopology();
-    } else {
-      syncVoronoiUI();
-    }
-  });
-  elements.voronoiDensity.addEventListener("input", (event) => {
-    state.voronoiDensity = Number(event.target.value);
     syncVoronoiUI();
   });
   elements.speedInput.addEventListener("input", (event) => {
@@ -1447,7 +1430,6 @@ function init() {
   elements.rowsInput.value = String(state.rows);
   elements.colsInput.value = String(state.cols);
   elements.voronoiJitter.value = String(Math.round(state.voronoiJitter * 100));
-  elements.voronoiDensity.value = String(state.voronoiDensity);
   syncSidebar();
   bindEvents();
   rebuildTopology();
