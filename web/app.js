@@ -26,6 +26,9 @@ const elements = {
   cellsValue: document.querySelector("#cells-value"),
   playToggle: document.querySelector("#play-toggle"),
   stepOnce: document.querySelector("#step-once"),
+  stepBack: document.querySelector("#step-back"),
+  resetGenZero: document.querySelector("#reset-gen-zero"),
+  swapColors: document.querySelector("#swap-colors"),
   clearGrid: document.querySelector("#clear-grid"),
   randomizeGrid: document.querySelector("#randomize-grid"),
   gridType: document.querySelector("#grid-type"),
@@ -75,7 +78,11 @@ const state = {
   voronoiJitter: 0.7,
   voronoiDensity: 4,
   sidebarOpen: window.innerWidth > 720,
+  colorsSwapped: false,
+  history: [],
+  gen0Snapshot: null,
 };
+const HISTORY_LIMIT = 200;
 
 const pointerState = {
   painting: false,
@@ -779,7 +786,37 @@ function rebuildTopology() {
   } else {
     state.grid = makeGrid(state.rows, state.cols, 0);
   }
+  // Topology changed: previous snapshots would have stale cell counts.
+  state.history = [];
+  state.gen0Snapshot = null;
   syncLabels();
+}
+
+function snapshotCurrent() {
+  if (isTiling()) {
+    return { type: "tiling", data: state.tilingStates.slice() };
+  }
+  return { type: "grid", data: state.grid.map((row) => row.slice()) };
+}
+
+function restoreSnapshot(snap) {
+  if (!snap) {
+    return false;
+  }
+  if (snap.type === "tiling" && isTiling() && snap.data.length === state.tilingStates.length) {
+    state.tilingStates = snap.data.slice();
+    return true;
+  }
+  if (snap.type === "grid" && !isTiling()) {
+    state.grid = snap.data.map((row) => row.slice());
+    return true;
+  }
+  return false;
+}
+
+function captureGenZero() {
+  state.gen0Snapshot = snapshotCurrent();
+  state.history = [];
 }
 
 function randomizeState() {
@@ -789,6 +826,7 @@ function randomizeState() {
   } else {
     state.grid = state.grid.map((row) => row.map(() => (Math.random() < state.density ? 1 : 0)));
   }
+  captureGenZero();
   syncLabels();
 }
 
@@ -799,6 +837,7 @@ function clearState() {
   } else {
     state.grid = makeGrid(state.rows, state.cols, 0);
   }
+  captureGenZero();
   syncLabels();
 }
 
@@ -808,7 +847,37 @@ function invertState() {
   } else {
     state.grid = state.grid.map((row) => row.map((value) => 1 - value));
   }
+  // Inverting resets the starting-point: the inverted state becomes gen 0.
+  state.generation = 0;
+  captureGenZero();
   syncLabels();
+}
+
+function swapColors() {
+  state.colorsSwapped = !state.colorsSwapped;
+  syncLabels();
+}
+
+function resetToGenZero() {
+  if (!state.gen0Snapshot) {
+    return;
+  }
+  if (restoreSnapshot(state.gen0Snapshot)) {
+    state.generation = 0;
+    state.history = [];
+    syncLabels();
+  }
+}
+
+function stepBack() {
+  if (state.history.length === 0) {
+    return;
+  }
+  const prev = state.history.pop();
+  if (restoreSnapshot(prev)) {
+    state.generation = Math.max(0, state.generation - 1);
+    syncLabels();
+  }
 }
 
 function population() {
@@ -823,6 +892,14 @@ function cellCount() {
 }
 
 function stepOnce() {
+  // Snapshot the pre-step state so Back can undo it.
+  if (state.generation === 0 && !state.gen0Snapshot) {
+    state.gen0Snapshot = snapshotCurrent();
+  }
+  state.history.push(snapshotCurrent());
+  if (state.history.length > HISTORY_LIMIT) {
+    state.history.shift();
+  }
   if (isTiling()) {
     state.tilingStates = stepTiling(state.tilingStates, state.tilingNeighbors);
   } else if (state.gridType === "triangle") {
@@ -923,11 +1000,13 @@ function gridColors() {
 function drawSquareGrid(width, height) {
   const theme = themeCanvas();
   const { cell, ox, oy } = squareMetrics(width, height);
+  const alive = state.colorsSwapped ? theme.squareDead : "#f4d35e";
+  const dead = state.colorsSwapped ? "#f4d35e" : theme.squareDead;
   ctx.fillStyle = theme.canvasBg;
   ctx.fillRect(0, 0, width, height);
   for (let r = 0; r < state.rows; r += 1) {
     for (let c = 0; c < state.cols; c += 1) {
-      ctx.fillStyle = state.grid[r][c] ? "#f4d35e" : theme.squareDead;
+      ctx.fillStyle = state.grid[r][c] ? alive : dead;
       ctx.fillRect(ox + c * cell, oy + r * cell, cell, cell);
       if (cell > 6) {
         ctx.strokeStyle = theme.gridStroke;
@@ -940,6 +1019,8 @@ function drawSquareGrid(width, height) {
 function drawTriangleGrid(width, height) {
   const theme = themeCanvas();
   const metrics = triMetrics(width, height);
+  const alive = state.colorsSwapped ? theme.squareDead : "#f4d35e";
+  const dead = state.colorsSwapped ? "#f4d35e" : theme.squareDead;
   ctx.fillStyle = theme.canvasBg;
   ctx.fillRect(0, 0, width, height);
   for (let r = 0; r < state.rows; r += 1) {
@@ -950,7 +1031,7 @@ function drawTriangleGrid(width, height) {
       ctx.lineTo(points[1][0], points[1][1]);
       ctx.lineTo(points[2][0], points[2][1]);
       ctx.closePath();
-      ctx.fillStyle = state.grid[r][c] ? "#f4d35e" : theme.squareDead;
+      ctx.fillStyle = state.grid[r][c] ? alive : dead;
       ctx.fill();
       ctx.strokeStyle = theme.gridStroke;
       ctx.stroke();
@@ -977,7 +1058,11 @@ function drawTiling(width, height) {
     });
     ctx.closePath();
     const face = state.tilingFaceTypes[index] % palette.alive.length;
-    ctx.fillStyle = state.tilingStates[index] ? palette.alive[face] : palette.dead;
+    const aliveColor = palette.alive[face];
+    // When swapped: live cells get the dead color, dead cells get the alive palette.
+    ctx.fillStyle = state.colorsSwapped
+      ? (state.tilingStates[index] ? palette.dead : aliveColor)
+      : (state.tilingStates[index] ? aliveColor : palette.dead);
     ctx.fill();
     ctx.strokeStyle = theme.tilingStroke;
     ctx.lineWidth = 1;
@@ -1018,6 +1103,9 @@ function syncLabels() {
   elements.speedValue.textContent = String(state.speed);
   elements.densityValue.textContent = `${Math.round(state.density * 100)}%`;
   elements.thresholdValue.textContent = String(state.threshold);
+  elements.stepBack.disabled = state.history.length === 0;
+  elements.resetGenZero.disabled = state.generation === 0 || !state.gen0Snapshot;
+  elements.swapColors.classList.toggle("active", state.colorsSwapped);
   syncVoronoiUI();
 }
 
@@ -1095,6 +1183,11 @@ function applyPaint(target, value) {
     const [r, c] = target;
     state.grid[r][c] = value;
   }
+  // Painting at gen 0 redefines the "base" state, so keep gen0 snapshot fresh.
+  if (state.generation === 0) {
+    state.gen0Snapshot = snapshotCurrent();
+    state.history = [];
+  }
   syncLabels();
 }
 
@@ -1159,6 +1252,7 @@ function applyImageToCurrentGeometry(image) {
       }
     }
   }
+  captureGenZero();
   syncLabels();
 }
 
@@ -1242,6 +1336,9 @@ function bindEvents() {
     elements.playToggle.textContent = state.running ? "Pause" : "Play";
   });
   elements.stepOnce.addEventListener("click", stepOnce);
+  elements.stepBack.addEventListener("click", stepBack);
+  elements.resetGenZero.addEventListener("click", resetToGenZero);
+  elements.swapColors.addEventListener("click", swapColors);
   elements.clearGrid.addEventListener("click", clearState);
   elements.randomizeGrid.addEventListener("click", randomizeState);
   elements.wrapToggle.addEventListener("change", (event) => {

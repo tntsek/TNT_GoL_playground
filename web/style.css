@@ -504,3 +504,14 @@ input[type="file"]::file-selector-button {
   color: var(--accent-ink);
   border-color: var(--accent-strong);
 }
+
+#swap-colors.active {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent-strong);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

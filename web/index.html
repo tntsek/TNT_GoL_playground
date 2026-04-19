@@ -51,9 +51,15 @@
           <button id="play-toggle" class="primary full">Play</button>
 
           <div class="button-row triple">
-            <button id="step-once">Step</button>
+            <button id="step-back" data-tooltip="Step backward through history.">◂ Back</button>
+            <button id="step-once">Step ▸</button>
+            <button id="reset-gen-zero" data-tooltip="Restore the state at generation 0 (the last randomize, clear, or edit).">Gen 0</button>
+          </div>
+
+          <div class="button-row triple">
             <button id="clear-grid">Clear</button>
             <button id="randomize-grid">Random</button>
+            <button id="invert-grid" data-tooltip="Flip every cell's state (live becomes dead and vice versa).">Invert</button>
           </div>
 
           <label class="field">
@@ -125,7 +131,7 @@
               <input id="image-input" type="file" accept="image/*" />
             </label>
             <div class="button-row">
-              <button id="invert-grid">Invert</button>
+              <button id="swap-colors" data-tooltip="Swap which color represents alive and dead. Cell states are unchanged.">Swap Colors</button>
               <button id="snapshot-image">Save PNG</button>
             </div>
           </div>
