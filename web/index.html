@@ -121,13 +121,80 @@
             <input id="threshold-input" type="range" min="0" max="255" value="140" />
           </label>
 
+          <div class="button-row">
+            <button id="toggle-color-panel" data-tooltip="Color Mode — apply Goethean polarity or generational hue-rotation rules on top of Conway.">Colors</button>
+            <button id="toggle-tools-panel" data-tooltip="Editor tools — pencil, eraser, rectangle select, copy, cut, paste.">Tools</button>
+          </div>
+
+          <div id="color-options" class="voronoi-options" hidden>
+            <div class="section-title">Color Rules</div>
+            <label class="field">
+              <span>Ruleset</span>
+              <select id="color-rule">
+                <option value="none" selected>None</option>
+                <option value="goethean">Goethean polarity</option>
+                <option value="rotation">Generational rotation</option>
+              </select>
+            </label>
+            <label class="range">
+              <span>Lightness <strong id="color-lightness-value">50%</strong> <button type="button" class="info-btn" data-tooltip="HSL lightness for live cells. 50% gives the most saturated colors.">?</button></span>
+              <input id="color-lightness" type="range" min="10" max="90" value="50" />
+            </label>
+
+            <div id="color-goethean-options" hidden>
+              <div class="field">
+                <span>Newborn saturation</span>
+                <div class="button-row">
+                  <button id="goethean-sat-full" class="seg-btn active" data-tooltip="Newborn cells start at full saturation regardless of parent state.">Full</button>
+                  <button id="goethean-sat-inherit" class="seg-btn" data-tooltip="Newborn saturation = average of eligible parents' current saturations.">Inherit</button>
+                </div>
+              </div>
+              <div class="color-legend">
+                <span class="swatch" style="background: hsl(30, 80%, 55%)"></span><span>Warm 0–180°</span>
+                <span class="swatch" style="background: hsl(240, 70%, 60%)"></span><span>Cool 180–360°</span>
+              </div>
+            </div>
+
+            <div id="color-rotation-options" hidden>
+              <div class="field">
+                <span>Newborn hue</span>
+                <div class="button-row">
+                  <button id="rotation-hue-fixed" class="seg-btn active" data-tooltip="Every newborn cell starts at the configured fixed hue.">Fixed</button>
+                  <button id="rotation-hue-parent" class="seg-btn" data-tooltip="Newborn hue = circular mean of all live parents' hues.">Parent avg</button>
+                </div>
+              </div>
+              <label class="field" id="rotation-fixed-hue-field">
+                <span>Start hue</span>
+                <input id="rotation-fixed-hue" type="color" value="#ff0000" />
+              </label>
+              <label class="field">
+                <span>Rotation / gen (°)</span>
+                <input id="rotation-delta" type="number" min="-180" max="180" value="15" />
+              </label>
+            </div>
+          </div>
+
+          <div id="tools-options" class="voronoi-options" hidden>
+            <div class="section-title">Tools</div>
+            <div class="button-row triple">
+              <button id="tool-pencil" class="seg-btn active" data-tooltip="Click and drag to paint live cells.">Pencil</button>
+              <button id="tool-eraser" class="seg-btn" data-tooltip="Click and drag to erase cells.">Eraser</button>
+              <button id="tool-select" class="seg-btn" data-tooltip="Drag a rectangle to select cells.">Select</button>
+            </div>
+            <div class="button-row triple">
+              <button id="tool-copy" disabled data-tooltip="Copy selection to clipboard.">Copy</button>
+              <button id="tool-cut" disabled data-tooltip="Copy selection to clipboard, then erase it.">Cut</button>
+              <button id="tool-paste" disabled data-tooltip="Stamp the clipboard at the cursor. Click on the canvas to place.">Paste</button>
+            </div>
+          </div>
+
           <div class="io-row">
             <label class="file-field">
               <span>Image</span>
               <input id="image-input" type="file" accept="image/*" />
             </label>
             <div class="button-row">
-              <button id="swap-colors" data-tooltip="Swap which color represents alive and dead. Cell states are unchanged.">Swap Colors</button>
+              <button id="swap-colors" data-tooltip="Without color rules: swap alive/dead palette. With color rules: rotate every cell's hue by 180° to its complement on the color wheel.">Swap Colors</button>
               <button id="snapshot-image">Save PNG</button>
             </div>
           </div>

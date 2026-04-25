@@ -1,3 +1,19 @@
+import {
+  RULESETS,
+  defaultColorSettings,
+  makeColorState,
+  cloneColorState,
+  clearColorState,
+  clearCellColor,
+  setCellColor,
+  stepColor,
+  wrapHue,
+  hexToHsl,
+  rgbToHsl,
+  hslCss,
+  hueToHex,
+} from "./colorRules.js";
+
 const PHI = (1 + Math.sqrt(5)) / 2;
 const SQRT2 = Math.sqrt(2);
 const SQRT3 = Math.sqrt(3);
@@ -53,6 +69,28 @@ const elements = {
   voronoiManhattan: document.querySelector("#voronoi-manhattan"),
   voronoiJitter: document.querySelector("#voronoi-jitter"),
   voronoiJitterValue: document.querySelector("#voronoi-jitter-value"),
+  toggleColorPanel: document.querySelector("#toggle-color-panel"),
+  toggleToolsPanel: document.querySelector("#toggle-tools-panel"),
+  colorOptions: document.querySelector("#color-options"),
+  colorRule: document.querySelector("#color-rule"),
+  colorLightness: document.querySelector("#color-lightness"),
+  colorLightnessValue: document.querySelector("#color-lightness-value"),
+  colorGoetheanOptions: document.querySelector("#color-goethean-options"),
+  goetheanSatFull: document.querySelector("#goethean-sat-full"),
+  goetheanSatInherit: document.querySelector("#goethean-sat-inherit"),
+  colorRotationOptions: document.querySelector("#color-rotation-options"),
+  rotationHueFixed: document.querySelector("#rotation-hue-fixed"),
+  rotationHueParent: document.querySelector("#rotation-hue-parent"),
+  rotationFixedHueField: document.querySelector("#rotation-fixed-hue-field"),
+  rotationFixedHue: document.querySelector("#rotation-fixed-hue"),
+  rotationDelta: document.querySelector("#rotation-delta"),
+  toolsOptions: document.querySelector("#tools-options"),
+  toolPencil: document.querySelector("#tool-pencil"),
+  toolEraser: document.querySelector("#tool-eraser"),
+  toolSelect: document.querySelector("#tool-select"),
+  toolCopy: document.querySelector("#tool-copy"),
+  toolCut: document.querySelector("#tool-cut"),
+  toolPaste: document.querySelector("#tool-paste"),
 };
 
 const state = {
@@ -78,6 +116,18 @@ const state = {
   colorsSwapped: false,
   history: [],
   gen0Snapshot: null,
+  // Color rules
+  colorSettings: defaultColorSettings(),
+  color: makeColorState(0),
+  // Editor tools
+  tool: "pencil", // 'pencil' | 'eraser' | 'select'
+  selection: null, // Set<flatIdx> | null
+  selectionDrag: null, // in-progress rectangle in screen coords
+  clipboard: null, // see editor-tools commit
+  pasteGhost: null, // {dx,dy} during move/paste preview
+  // Submenu visibility (UI)
+  colorPanelOpen: false,
+  toolsPanelOpen: false,
 };
 const HISTORY_LIMIT = 200;
 
@@ -865,29 +915,40 @@ function rebuildTopology() {
   // Topology changed: previous snapshots would have stale cell counts.
   state.history = [];
   state.gen0Snapshot = null;
+  state.selection = null;
+  resizeColorState();
   syncLabels();
 }
 
 function snapshotCurrent() {
-  if (isTiling()) {
-    return { type: "tiling", data: state.tilingStates.slice() };
+  const base = isTiling()
+    ? { type: "tiling", data: state.tilingStates.slice() }
+    : { type: "grid", data: state.grid.map((row) => row.slice()) };
+  if (colorRuleActive()) {
+    base.color = cloneColorState(state.color);
   }
-  return { type: "grid", data: state.grid.map((row) => row.slice()) };
+  return base;
 }
 
 function restoreSnapshot(snap) {
   if (!snap) {
     return false;
   }
+  let ok = false;
   if (snap.type === "tiling" && isTiling() && snap.data.length === state.tilingStates.length) {
     state.tilingStates = snap.data.slice();
-    return true;
-  }
-  if (snap.type === "grid" && !isTiling()) {
+    ok = true;
+  } else if (snap.type === "grid" && !isTiling()) {
     state.grid = snap.data.map((row) => row.slice());
-    return true;
+    ok = true;
   }
-  return false;
+  if (ok && snap.color && snap.color.hue.length === state.color.hue.length) {
+    state.color = cloneColorState(snap.color);
+  } else if (ok && colorRuleActive()) {
+    // Snapshot predates color rule activation — re-seed alive cells.
+    seedColorsForAllAlive();
+  }
+  return ok;
 }
 
 function captureGenZero() {
@@ -902,6 +963,9 @@ function randomizeState() {
   } else {
     state.grid = state.grid.map((row) => row.map(() => (Math.random() < state.density ? 1 : 0)));
   }
+  if (colorRuleActive()) {
+    seedColorsForAllAlive();
+  }
   captureGenZero();
   syncLabels();
 }
@@ -913,6 +977,10 @@ function clearState() {
   } else {
     state.grid = makeGrid(state.rows, state.cols, 0);
   }
+  // Clearing wipes color state too (per spec: clear resets all cell color
+  // state but not the ruleset choice).
+  clearColorState(state.color);
+  state.selection = null;
   captureGenZero();
   syncLabels();
 }
@@ -922,6 +990,9 @@ function invertState() {
     state.tilingStates = state.tilingStates.map((value) => 1 - value);
   } else {
     state.grid = state.grid.map((row) => row.map((value) => 1 - value));
+  }
+  if (colorRuleActive()) {
+    seedColorsForAllAlive();
   }
   // Inverting resets the starting-point: the inverted state becomes gen 0.
   state.generation = 0;
@@ -967,6 +1038,162 @@ function cellCount() {
   return isTiling() ? state.tilingStates.length : state.rows * state.cols;
 }
 
+// ─── Flat-index helpers (for color rules + tools) ───────────────────────────
+// Cells are addressed by a flat index regardless of geometry:
+//   tiling: polygon index
+//   grid:   r * cols + c
+
+function flatIndexOf(target) {
+  if (target == null) return -1;
+  if (isTiling()) return target;
+  const [r, c] = target;
+  return r * state.cols + c;
+}
+
+function flatToTarget(idx) {
+  if (isTiling()) return idx;
+  const r = Math.floor(idx / state.cols);
+  return [r, idx - r * state.cols];
+}
+
+function isAliveAt(idx) {
+  if (isTiling()) return state.tilingStates[idx] === 1;
+  const r = Math.floor(idx / state.cols);
+  const c = idx - r * state.cols;
+  return state.grid[r][c] === 1;
+}
+
+function setAliveAt(idx, value) {
+  const v = value ? 1 : 0;
+  if (isTiling()) {
+    state.tilingStates[idx] = v;
+  } else {
+    const r = Math.floor(idx / state.cols);
+    const c = idx - r * state.cols;
+    state.grid[r][c] = v;
+  }
+}
+
+function flatAlive() {
+  const n = cellCount();
+  const out = new Uint8Array(n);
+  if (isTiling()) {
+    for (let i = 0; i < n; i += 1) out[i] = state.tilingStates[i];
+  } else {
+    for (let r = 0; r < state.rows; r += 1) {
+      const row = state.grid[r];
+      const base = r * state.cols;
+      for (let c = 0; c < state.cols; c += 1) {
+        out[base + c] = row[c];
+      }
+    }
+  }
+  return out;
+}
+
+function applyFlatAlive(flat) {
+  if (isTiling()) {
+    state.tilingStates = Array.from(flat);
+    return;
+  }
+  for (let r = 0; r < state.rows; r += 1) {
+    const row = state.grid[r];
+    const base = r * state.cols;
+    for (let c = 0; c < state.cols; c += 1) {
+      row[c] = flat[base + c];
+    }
+  }
+}
+
+function neighborsOfFn() {
+  if (isTiling()) {
+    return (i) => state.tilingNeighbors[i];
+  }
+  const rows = state.rows;
+  const cols = state.cols;
+  const wrap = state.wrap;
+  if (state.gridType === "triangle") {
+    return (i) => {
+      const r = Math.floor(i / cols);
+      const c = i - r * cols;
+      const offsets = (r + c) % 2 === 0 ? TRI_UP_OFFSETS : TRI_DN_OFFSETS;
+      const out = [];
+      for (let k = 0; k < offsets.length; k += 1) {
+        const [dr, dc] = offsets[k];
+        let nr = r + dr;
+        let nc = c + dc;
+        if (wrap) {
+          nr = ((nr % rows) + rows) % rows;
+          nc = ((nc % cols) + cols) % cols;
+        } else if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) {
+          continue;
+        }
+        out.push(nr * cols + nc);
+      }
+      return out;
+    };
+  }
+  return (i) => {
+    const r = Math.floor(i / cols);
+    const c = i - r * cols;
+    const out = [];
+    for (let dr = -1; dr <= 1; dr += 1) {
+      for (let dc = -1; dc <= 1; dc += 1) {
+        if (dr === 0 && dc === 0) continue;
+        let nr = r + dr;
+        let nc = c + dc;
+        if (wrap) {
+          nr = ((nr % rows) + rows) % rows;
+          nc = ((nc % cols) + cols) % cols;
+        } else if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) {
+          continue;
+        }
+        out.push(nr * cols + nc);
+      }
+    }
+    return out;
+  };
+}
+
+// ─── Color state lifecycle ─────────────────────────────────────────────────
+
+function colorRuleActive() {
+  return state.colorSettings.rule !== RULESETS.NONE;
+}
+
+function resizeColorState() {
+  state.color = makeColorState(cellCount());
+}
+
+// Seed color for a newly-alive cell at index i, given current settings.
+// Used for clicks, randomize, image-without-pixel-hue, etc.
+function seedColorAt(i, hue, saturation = 1.0) {
+  setCellColor(state.color, i, hue, saturation);
+}
+
+function defaultSeedHue() {
+  if (state.colorSettings.rule === RULESETS.ROTATION) {
+    return state.colorSettings.rotationFixedHue;
+  }
+  // Goethean / none: random hue gives interesting starting mixtures.
+  return Math.random() * 360;
+}
+
+// Re-seed color for every currently-alive cell that lacks color (sat=0).
+// Called on toggling a ruleset on, after randomize, after invert, etc.
+function seedColorsForAllAlive() {
+  const n = cellCount();
+  for (let i = 0; i < n; i += 1) {
+    if (isAliveAt(i)) {
+      if (state.color.sat[i] <= 0 || state.color.origSat[i] <= 0) {
+        seedColorAt(i, defaultSeedHue(), 1.0);
+      }
+    } else {
+      clearCellColor(state.color, i);
+    }
+  }
+}
+
 function stepOnce() {
   // Snapshot the pre-step state so Back can undo it.
   if (state.generation === 0 && !state.gen0Snapshot) {
@@ -976,7 +1203,18 @@ function stepOnce() {
   if (state.history.length > HISTORY_LIMIT) {
     state.history.shift();
   }
-  if (isTiling()) {
+  if (colorRuleActive()) {
+    const alive = flatAlive();
+    const { nextAlive, nextColor } = stepColor(
+      alive,
+      state.color,
+      neighborsOfFn(),
+      cellCount(),
+      state.colorSettings,
+    );
+    applyFlatAlive(nextAlive);
+    state.color = nextColor;
+  } else if (isTiling()) {
     state.tilingStates = stepTiling(state.tilingStates, state.tilingNeighbors);
   } else if (state.gridType === "triangle") {
     state.grid = stepGridTri(state.grid, state.wrap);
@@ -1073,16 +1311,33 @@ function gridColors() {
   return { alive: ["#f6d97d"], dead };
 }
 
+// Returns the fill color for a live cell at flat index `i`, honoring the
+// active color ruleset and the colorsSwapped flag (which rotates hue 180°
+// to its complement when a color ruleset is active).
+function liveFillFor(i, fallbackHex) {
+  if (!colorRuleActive()) {
+    return fallbackHex;
+  }
+  let h = state.color.hue[i];
+  const s = state.color.sat[i];
+  if (state.colorsSwapped) h = wrapHue(h + 180);
+  // If a cell is alive but somehow has zero saturation (e.g. just before
+  // dying under Goethean), keep it visible at a low floor.
+  const safeS = s > 0 ? s : 1.0;
+  return hslCss(h, safeS, state.colorSettings.lightness);
+}
+
 function drawSquareGrid(width, height) {
   const theme = themeCanvas();
   const { cell, ox, oy } = squareMetrics(width, height);
-  const alive = state.colorsSwapped ? theme.squareDead : "#f4d35e";
-  const dead = state.colorsSwapped ? "#f4d35e" : theme.squareDead;
+  const aliveDefault = state.colorsSwapped ? theme.squareDead : "#f4d35e";
+  const dead = state.colorsSwapped && !colorRuleActive() ? "#f4d35e" : theme.squareDead;
   ctx.fillStyle = theme.canvasBg;
   ctx.fillRect(0, 0, width, height);
   for (let r = 0; r < state.rows; r += 1) {
     for (let c = 0; c < state.cols; c += 1) {
-      ctx.fillStyle = state.grid[r][c] ? alive : dead;
+      const alive = state.grid[r][c] === 1;
+      ctx.fillStyle = alive ? liveFillFor(r * state.cols + c, aliveDefault) : dead;
       ctx.fillRect(ox + c * cell, oy + r * cell, cell, cell);
       if (cell > 6) {
         ctx.strokeStyle = theme.gridStroke;
@@ -1095,8 +1350,8 @@ function drawSquareGrid(width, height) {
 function drawTriangleGrid(width, height) {
   const theme = themeCanvas();
   const metrics = triMetrics(width, height);
-  const alive = state.colorsSwapped ? theme.squareDead : "#f4d35e";
-  const dead = state.colorsSwapped ? "#f4d35e" : theme.squareDead;
+  const aliveDefault = state.colorsSwapped ? theme.squareDead : "#f4d35e";
+  const dead = state.colorsSwapped && !colorRuleActive() ? "#f4d35e" : theme.squareDead;
   ctx.fillStyle = theme.canvasBg;
   ctx.fillRect(0, 0, width, height);
   for (let r = 0; r < state.rows; r += 1) {
@@ -1107,7 +1362,8 @@ function drawTriangleGrid(width, height) {
       ctx.lineTo(points[1][0], points[1][1]);
       ctx.lineTo(points[2][0], points[2][1]);
       ctx.closePath();
-      ctx.fillStyle = state.grid[r][c] ? alive : dead;
+      const alive = state.grid[r][c] === 1;
+      ctx.fillStyle = alive ? liveFillFor(r * state.cols + c, aliveDefault) : dead;
       ctx.fill();
       ctx.strokeStyle = theme.gridStroke;
       ctx.stroke();
@@ -1135,10 +1391,17 @@ function drawTiling(width, height) {
     ctx.closePath();
     const face = state.tilingFaceTypes[index] % palette.alive.length;
     const aliveColor = palette.alive[face];
-    // When swapped: live cells get the dead color, dead cells get the alive palette.
-    ctx.fillStyle = state.colorsSwapped
-      ? (state.tilingStates[index] ? palette.dead : aliveColor)
-      : (state.tilingStates[index] ? aliveColor : palette.dead);
+    const isAlive = state.tilingStates[index] === 1;
+    let fill;
+    if (colorRuleActive()) {
+      // Color rules drive alive fill; dead cells stay on the theme dead color.
+      fill = isAlive ? liveFillFor(index, aliveColor) : palette.dead;
+    } else if (state.colorsSwapped) {
+      fill = isAlive ? palette.dead : aliveColor;
+    } else {
+      fill = isAlive ? aliveColor : palette.dead;
+    }
+    ctx.fillStyle = fill;
     ctx.fill();
     ctx.strokeStyle = theme.tilingStroke;
     ctx.lineWidth = 1;
@@ -1170,6 +1433,138 @@ function render() {
   } else {
     drawSquareGrid(rect.width, rect.height);
   }
+
+  drawSelectionOverlay(rect.width, rect.height);
+  drawPasteGhost(rect.width, rect.height);
+}
+
+function drawSelectionOverlay(width, height) {
+  // Tinted highlight on selected cells.
+  if (state.selection && state.selection.size > 0) {
+    ctx.save();
+    ctx.fillStyle = "rgba(110, 180, 255, 0.28)";
+    ctx.strokeStyle = "rgba(180, 220, 255, 0.85)";
+    ctx.lineWidth = 1.4;
+    if (isTiling()) {
+      const metrics = tilingMetrics(width, height);
+      state.selection.forEach((idx) => {
+        const poly = state.polygons[idx];
+        ctx.beginPath();
+        poly.forEach(([x, y], i) => {
+          const sx = metrics.ox + x * metrics.scale;
+          const sy = metrics.oy + y * metrics.scale;
+          if (i === 0) ctx.moveTo(sx, sy);
+          else ctx.lineTo(sx, sy);
+        });
+        ctx.closePath();
+        ctx.fill();
+      });
+    } else if (state.gridType === "triangle") {
+      const metrics = triMetrics(width, height);
+      state.selection.forEach((idx) => {
+        const r = Math.floor(idx / state.cols);
+        const c = idx - r * state.cols;
+        const points = triCellPoints(r, c, metrics);
+        ctx.beginPath();
+        ctx.moveTo(points[0][0], points[0][1]);
+        ctx.lineTo(points[1][0], points[1][1]);
+        ctx.lineTo(points[2][0], points[2][1]);
+        ctx.closePath();
+        ctx.fill();
+      });
+    } else {
+      const { cell, ox, oy } = squareMetrics(width, height);
+      state.selection.forEach((idx) => {
+        const r = Math.floor(idx / state.cols);
+        const c = idx - r * state.cols;
+        ctx.fillRect(ox + c * cell, oy + r * cell, cell, cell);
+      });
+    }
+    ctx.restore();
+  }
+  // Drag rectangle in progress
+  if (state.selectionDrag) {
+    const d = state.selectionDrag;
+    const x = Math.min(d.sx0, d.sx1);
+    const y = Math.min(d.sy0, d.sy1);
+    const w = Math.abs(d.sx1 - d.sx0);
+    const h = Math.abs(d.sy1 - d.sy0);
+    ctx.save();
+    ctx.fillStyle = "rgba(255, 255, 255, 0.08)";
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.7)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeRect(x, y, w, h);
+    ctx.restore();
+  }
+}
+
+function drawPasteGhost(width, height) {
+  if (state.tool !== "paste" || !state.clipboard || !state.pasteGhost) return;
+  const pos = state.pasteGhost;
+  ctx.save();
+  ctx.fillStyle = "rgba(232, 192, 90, 0.35)";
+  if (state.clipboard.kind === "grid" && !isTiling()) {
+    const target = cellAtPointer(pos);
+    if (!target) { ctx.restore(); return; }
+    const [tr, tc] = target;
+    if (state.gridType === "triangle") {
+      const metrics = triMetrics(width, height);
+      state.clipboard.items.forEach((item) => {
+        const r = tr + item.dr;
+        const c = tc + item.dc;
+        if (r < 0 || r >= state.rows || c < 0 || c >= state.cols) return;
+        const points = triCellPoints(r, c, metrics);
+        ctx.beginPath();
+        ctx.moveTo(points[0][0], points[0][1]);
+        ctx.lineTo(points[1][0], points[1][1]);
+        ctx.lineTo(points[2][0], points[2][1]);
+        ctx.closePath();
+        ctx.fill();
+      });
+    } else {
+      const { cell, ox, oy } = squareMetrics(width, height);
+      state.clipboard.items.forEach((item) => {
+        const r = tr + item.dr;
+        const c = tc + item.dc;
+        if (r < 0 || r >= state.rows || c < 0 || c >= state.cols) return;
+        ctx.fillRect(ox + c * cell, oy + r * cell, cell, cell);
+      });
+    }
+  } else if (state.clipboard.kind === "tiling" && isTiling()) {
+    const metrics = tilingMetrics(width, height);
+    const wx0 = (pos.x - metrics.ox) / metrics.scale;
+    const wy0 = (pos.y - metrics.oy) / metrics.scale;
+    state.clipboard.items.forEach((item) => {
+      const tx = wx0 + item.dx;
+      const ty = wy0 + item.dy;
+      let bestI = -1;
+      let bestD = Infinity;
+      for (let i = 0; i < state.polygons.length; i += 1) {
+        const [cx, cy] = polygonCentroid(state.polygons[i]);
+        const dx = cx - tx;
+        const dy = cy - ty;
+        const d = dx * dx + dy * dy;
+        if (d < bestD) {
+          bestD = d;
+          bestI = i;
+        }
+      }
+      if (bestI < 0) return;
+      const poly = state.polygons[bestI];
+      ctx.beginPath();
+      poly.forEach(([x, y], i) => {
+        const sx = metrics.ox + x * metrics.scale;
+        const sy = metrics.oy + y * metrics.scale;
+        if (i === 0) ctx.moveTo(sx, sy);
+        else ctx.lineTo(sx, sy);
+      });
+      ctx.closePath();
+      ctx.fill();
+    });
+  }
+  ctx.restore();
 }
 
 function syncLabels() {
@@ -1194,6 +1589,61 @@ function syncVoronoiUI() {
   elements.voronoiJitterValue.textContent = `${Math.round(state.voronoiJitter * 100)}%`;
   elements.voronoiEuclid.classList.toggle("active", state.voronoiMetric === "euclidean");
   elements.voronoiManhattan.classList.toggle("active", state.voronoiMetric === "manhattan");
+}
+
+function syncColorUI() {
+  if (!elements.colorOptions) return;
+  elements.colorOptions.hidden = !state.colorPanelOpen;
+  elements.toggleColorPanel.classList.toggle("active", state.colorPanelOpen);
+  elements.colorRule.value = state.colorSettings.rule;
+  elements.colorLightness.value = String(Math.round(state.colorSettings.lightness * 100));
+  elements.colorLightnessValue.textContent = `${Math.round(state.colorSettings.lightness * 100)}%`;
+  const isGoethean = state.colorSettings.rule === RULESETS.GOETHEAN;
+  const isRotation = state.colorSettings.rule === RULESETS.ROTATION;
+  elements.colorGoetheanOptions.hidden = !isGoethean;
+  elements.colorRotationOptions.hidden = !isRotation;
+  elements.goetheanSatFull.classList.toggle("active", state.colorSettings.goetheanSatStart === "full");
+  elements.goetheanSatInherit.classList.toggle("active", state.colorSettings.goetheanSatStart === "inherit");
+  elements.rotationHueFixed.classList.toggle("active", state.colorSettings.rotationHueStart === "fixed");
+  elements.rotationHueParent.classList.toggle("active", state.colorSettings.rotationHueStart === "parent");
+  elements.rotationFixedHueField.hidden = state.colorSettings.rotationHueStart !== "fixed";
+  elements.rotationFixedHue.value = hueToHex(state.colorSettings.rotationFixedHue);
+  elements.rotationDelta.value = String(state.colorSettings.rotationDelta);
+}
+
+function syncToolsUI() {
+  if (!elements.toolsOptions) return;
+  elements.toolsOptions.hidden = !state.toolsPanelOpen;
+  elements.toggleToolsPanel.classList.toggle("active", state.toolsPanelOpen);
+  elements.toolPencil.classList.toggle("active", state.tool === "pencil");
+  elements.toolEraser.classList.toggle("active", state.tool === "eraser");
+  elements.toolSelect.classList.toggle("active", state.tool === "select");
+  const hasSelection = state.selection instanceof Set && state.selection.size > 0;
+  elements.toolCopy.disabled = !hasSelection;
+  elements.toolCut.disabled = !hasSelection;
+  elements.toolPaste.disabled = !state.clipboard;
+  // Update canvas cursor class
+  canvas.classList.toggle("tool-select", state.tool === "select");
+  canvas.classList.toggle("tool-eraser", state.tool === "eraser");
+  canvas.classList.toggle("tool-paste", state.tool === "paste");
+}
+
+function setColorRule(rule) {
+  const prev = state.colorSettings.rule;
+  state.colorSettings.rule = rule;
+  if (rule !== RULESETS.NONE && prev === RULESETS.NONE) {
+    // Activating: seed colors for currently-alive cells.
+    seedColorsForAllAlive();
+  } else if (rule === RULESETS.NONE) {
+    // Deactivating: clear color arrays so a future re-activation starts clean.
+    clearColorState(state.color);
+  }
+  // History snapshots become incompatible across rule changes (color presence
+  // differs). Easiest correctness fix: drop history.
+  state.history = [];
+  state.gen0Snapshot = snapshotCurrent();
+  syncLabels();
+  syncColorUI();
 }
 
 function pointerPosition(event) {
@@ -1248,15 +1698,19 @@ function cellAtPointer(pos) {
   return null;
 }
 
-function applyPaint(target, value) {
+function applyPaint(target, value, hueOverride = null) {
   if (target == null) {
     return;
   }
-  if (isTiling()) {
-    state.tilingStates[target] = value;
-  } else {
-    const [r, c] = target;
-    state.grid[r][c] = value;
+  const flat = flatIndexOf(target);
+  setAliveAt(flat, value);
+  if (colorRuleActive()) {
+    if (value) {
+      const hue = hueOverride != null ? hueOverride : defaultSeedHue();
+      seedColorAt(flat, hue, 1.0);
+    } else {
+      clearCellColor(state.color, flat);
+    }
   }
   // Painting at gen 0 redefines the "base" state, so keep gen0 snapshot fresh.
   if (state.generation === 0) {
@@ -1283,7 +1737,12 @@ function imageSampler(image) {
     const x = clamp(Math.floor(normX * (size - 1)), 0, size - 1);
     const y = clamp(Math.floor(normY * (size - 1)), 0, size - 1);
     const index = (y * size + x) * 4;
-    return 0.299 * data[index] + 0.587 * data[index + 1] + 0.114 * data[index + 2];
+    const r = data[index] / 255;
+    const g = data[index + 1] / 255;
+    const b = data[index + 2] / 255;
+    const brightness = 0.299 * data[index] + 0.587 * data[index + 1] + 0.114 * data[index + 2];
+    const hsl = rgbToHsl(r, g, b);
+    return { brightness, hue: hsl.h, sat: Math.max(0.2, hsl.s) };
   };
 }
 
@@ -1292,13 +1751,23 @@ function applyImageToCurrentGeometry(image) {
   state.generation = 0;
   state.running = false;
   elements.playToggle.textContent = "Play";
+  const useColor = colorRuleActive();
+  if (useColor) clearColorState(state.color);
+
+  const setLive = (flatIdx, smp) => {
+    if (useColor) {
+      seedColorAt(flatIdx, smp.hue, smp.sat);
+    }
+  };
 
   if (isTiling()) {
     const [bboxW, bboxH] = state.tilingBBox;
-    state.tilingStates = state.polygons.map((poly) => {
+    state.tilingStates = state.polygons.map((poly, index) => {
       const [cx, cy] = polygonCentroid(poly);
-      const brightness = sample(cx / bboxW, cy / bboxH);
-      return Number(brightness < state.threshold);
+      const smp = sample(cx / bboxW, cy / bboxH);
+      const alive = smp.brightness < state.threshold ? 1 : 0;
+      if (alive) setLive(index, smp);
+      return alive;
     });
   } else if (state.gridType === "triangle") {
     const metrics = {
@@ -1314,16 +1783,20 @@ function applyImageToCurrentGeometry(image) {
       for (let c = 0; c < state.cols; c += 1) {
         const points = triCellPoints(r, c, metrics);
         const centroid = polygonCentroid(points);
-        const brightness = sample(centroid[0] / totalW, centroid[1] / totalH);
-        state.grid[r][c] = Number(brightness < state.threshold);
+        const smp = sample(centroid[0] / totalW, centroid[1] / totalH);
+        const alive = smp.brightness < state.threshold ? 1 : 0;
+        state.grid[r][c] = alive;
+        if (alive) setLive(r * state.cols + c, smp);
       }
     }
   } else {
     state.grid = makeGrid(state.rows, state.cols, 0);
     for (let r = 0; r < state.rows; r += 1) {
       for (let c = 0; c < state.cols; c += 1) {
-        const brightness = sample((c + 0.5) / state.cols, (r + 0.5) / state.rows);
-        state.grid[r][c] = Number(brightness < state.threshold);
+        const smp = sample((c + 0.5) / state.cols, (r + 0.5) / state.rows);
+        const alive = smp.brightness < state.threshold ? 1 : 0;
+        state.grid[r][c] = alive;
+        if (alive) setLive(r * state.cols + c, smp);
       }
     }
   }
@@ -1357,26 +1830,225 @@ function loadImageFromFile(file) {
 
 function handlePointerDown(event) {
   const pos = pointerPosition(event);
-  const target = cellAtPointer(pos);
-  if (target == null) {
+
+  if (state.tool === "select") {
+    pointerState.selectingDrag = true;
+    state.selectionDrag = { sx0: pos.x, sy0: pos.y, sx1: pos.x, sy1: pos.y };
     return;
   }
+  if (state.tool === "paste") {
+    applyPasteAtPointer(pos);
+    state.tool = "pencil";
+    syncToolsUI();
+    return;
+  }
+  // pencil or eraser
+  const target = cellAtPointer(pos);
+  if (target == null) return;
   pointerState.painting = true;
-  pointerState.drawValue = isTiling()
-    ? (state.tilingStates[target] ? 0 : 1)
-    : (state.grid[target[0]][target[1]] ? 0 : 1);
+  pointerState.drawValue = state.tool === "eraser" ? 0 : 1;
   applyPaint(target, pointerState.drawValue);
 }
 
 function handlePointerMove(event) {
-  if (!pointerState.painting) {
+  const pos = pointerPosition(event);
+  if (state.tool === "paste") {
+    state.pasteGhost = pos;
     return;
   }
-  applyPaint(cellAtPointer(pointerPosition(event)), pointerState.drawValue);
+  if (pointerState.selectingDrag && state.selectionDrag) {
+    state.selectionDrag.sx1 = pos.x;
+    state.selectionDrag.sy1 = pos.y;
+    return;
+  }
+  if (!pointerState.painting) return;
+  applyPaint(cellAtPointer(pos), pointerState.drawValue);
 }
 
 function stopPainting() {
+  if (pointerState.selectingDrag) {
+    finalizeSelection();
+    pointerState.selectingDrag = false;
+    state.selectionDrag = null;
+  }
   pointerState.painting = false;
+}
+
+// ─── Selection / clipboard ─────────────────────────────────────────────────
+
+function finalizeSelection() {
+  const d = state.selectionDrag;
+  if (!d) return;
+  const x0 = Math.min(d.sx0, d.sx1);
+  const y0 = Math.min(d.sy0, d.sy1);
+  const x1 = Math.max(d.sx0, d.sx1);
+  const y1 = Math.max(d.sy0, d.sy1);
+  // Treat a tiny drag as a click → clear selection.
+  if (x1 - x0 < 3 && y1 - y0 < 3) {
+    state.selection = null;
+    syncToolsUI();
+    return;
+  }
+  const cells = new Set();
+  const rect = canvas.getBoundingClientRect();
+  if (isTiling()) {
+    const metrics = tilingMetrics(rect.width, rect.height);
+    state.polygons.forEach((poly, idx) => {
+      const [cx, cy] = polygonCentroid(poly);
+      const sx = metrics.ox + cx * metrics.scale;
+      const sy = metrics.oy + cy * metrics.scale;
+      if (sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1) cells.add(idx);
+    });
+  } else if (state.gridType === "triangle") {
+    const metrics = triMetrics(rect.width, rect.height);
+    for (let r = 0; r < state.rows; r += 1) {
+      for (let c = 0; c < state.cols; c += 1) {
+        const points = triCellPoints(r, c, metrics);
+        const cx = (points[0][0] + points[1][0] + points[2][0]) / 3;
+        const cy = (points[0][1] + points[1][1] + points[2][1]) / 3;
+        if (cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1) cells.add(r * state.cols + c);
+      }
+    }
+  } else {
+    const { cell, ox, oy } = squareMetrics(rect.width, rect.height);
+    const cMin = Math.max(0, Math.floor((x0 - ox) / cell));
+    const cMax = Math.min(state.cols - 1, Math.floor((x1 - ox) / cell));
+    const rMin = Math.max(0, Math.floor((y0 - oy) / cell));
+    const rMax = Math.min(state.rows - 1, Math.floor((y1 - oy) / cell));
+    for (let r = rMin; r <= rMax; r += 1) {
+      for (let c = cMin; c <= cMax; c += 1) {
+        cells.add(r * state.cols + c);
+      }
+    }
+  }
+  state.selection = cells.size > 0 ? cells : null;
+  syncToolsUI();
+}
+
+// Snapshot the selection into the clipboard. If `cut`, also erase those cells.
+function copySelection(cut) {
+  if (!state.selection || state.selection.size === 0) return;
+  const items = [];
+  const useColor = colorRuleActive();
+  if (isTiling()) {
+    const cxs = [];
+    const cys = [];
+    state.selection.forEach((idx) => {
+      const [cx, cy] = polygonCentroid(state.polygons[idx]);
+      cxs.push(cx);
+      cys.push(cy);
+    });
+    const ox = Math.min(...cxs);
+    const oy = Math.min(...cys);
+    state.selection.forEach((idx) => {
+      const [cx, cy] = polygonCentroid(state.polygons[idx]);
+      const item = { dx: cx - ox, dy: cy - oy };
+      if (useColor) {
+        item.hue = state.color.hue[idx];
+        item.sat = state.color.sat[idx];
+        item.origSat = state.color.origSat[idx];
+        item.age = state.color.age[idx];
+      }
+      items.push(item);
+    });
+    state.clipboard = { kind: "tiling", items };
+  } else {
+    const rs = [];
+    const cs = [];
+    state.selection.forEach((idx) => {
+      rs.push(Math.floor(idx / state.cols));
+      cs.push(idx - Math.floor(idx / state.cols) * state.cols);
+    });
+    const r0 = Math.min(...rs);
+    const c0 = Math.min(...cs);
+    state.selection.forEach((idx) => {
+      const r = Math.floor(idx / state.cols);
+      const c = idx - r * state.cols;
+      const item = { dr: r - r0, dc: c - c0 };
+      if (useColor) {
+        item.hue = state.color.hue[idx];
+        item.sat = state.color.sat[idx];
+        item.origSat = state.color.origSat[idx];
+        item.age = state.color.age[idx];
+      }
+      items.push(item);
+    });
+    state.clipboard = { kind: "grid", items };
+  }
+  if (cut) {
+    state.selection.forEach((idx) => {
+      setAliveAt(idx, 0);
+      if (useColor) clearCellColor(state.color, idx);
+    });
+    state.selection = null;
+    if (state.generation === 0) {
+      state.gen0Snapshot = snapshotCurrent();
+      state.history = [];
+    }
+  }
+  syncLabels();
+  syncToolsUI();
+}
+
+function writeColorFromClip(idx, item) {
+  if (item.hue == null) return;
+  state.color.hue[idx] = item.hue;
+  state.color.sat[idx] = item.sat ?? 1;
+  state.color.origSat[idx] = item.origSat ?? item.sat ?? 1;
+  state.color.age[idx] = item.age ?? 0;
+}
+
+function applyPasteAtPointer(pos) {
+  if (!state.clipboard) return;
+  const useColor = colorRuleActive();
+  if (state.clipboard.kind === "tiling" && isTiling()) {
+    const rect = canvas.getBoundingClientRect();
+    const metrics = tilingMetrics(rect.width, rect.height);
+    const wx0 = (pos.x - metrics.ox) / metrics.scale;
+    const wy0 = (pos.y - metrics.oy) / metrics.scale;
+    // Precompute centroids once
+    const centroids = state.polygons.map(polygonCentroid);
+    state.clipboard.items.forEach((item) => {
+      const tx = wx0 + item.dx;
+      const ty = wy0 + item.dy;
+      let bestI = -1;
+      let bestD = Infinity;
+      for (let i = 0; i < centroids.length; i += 1) {
+        const dx = centroids[i][0] - tx;
+        const dy = centroids[i][1] - ty;
+        const d = dx * dx + dy * dy;
+        if (d < bestD) {
+          bestD = d;
+          bestI = i;
+        }
+      }
+      if (bestI >= 0) {
+        setAliveAt(bestI, 1);
+        if (useColor) writeColorFromClip(bestI, item);
+        else if (colorRuleActive()) seedColorAt(bestI, defaultSeedHue(), 1);
+      }
+    });
+  } else if (state.clipboard.kind === "grid" && !isTiling()) {
+    const target = cellAtPointer(pos);
+    if (!target) return;
+    const [tr, tc] = target;
+    state.clipboard.items.forEach((item) => {
+      const r = tr + item.dr;
+      const c = tc + item.dc;
+      if (r < 0 || r >= state.rows || c < 0 || c >= state.cols) return;
+      const idx = r * state.cols + c;
+      setAliveAt(idx, 1);
+      if (useColor) writeColorFromClip(idx, item);
+    });
+  } else {
+    // Geometry mismatch — silently no-op.
+    return;
+  }
+  if (state.generation === 0) {
+    state.gen0Snapshot = snapshotCurrent();
+    state.history = [];
+  }
+  syncLabels();
 }
 
 function animate(timestamp) {
@@ -1492,6 +2164,60 @@ function bindEvents() {
     }
   });
 
+  // ─── Color Mode panel ───────────────────────────────────────────────────
+  elements.toggleColorPanel.addEventListener("click", () => {
+    state.colorPanelOpen = !state.colorPanelOpen;
+    syncColorUI();
+  });
+  elements.colorRule.addEventListener("change", (event) => {
+    setColorRule(event.target.value);
+  });
+  elements.colorLightness.addEventListener("input", (event) => {
+    state.colorSettings.lightness = clamp(Number(event.target.value) / 100, 0.05, 0.95);
+    elements.colorLightnessValue.textContent = `${Math.round(state.colorSettings.lightness * 100)}%`;
+  });
+  elements.goetheanSatFull.addEventListener("click", () => {
+    state.colorSettings.goetheanSatStart = "full";
+    syncColorUI();
+  });
+  elements.goetheanSatInherit.addEventListener("click", () => {
+    state.colorSettings.goetheanSatStart = "inherit";
+    syncColorUI();
+  });
+  elements.rotationHueFixed.addEventListener("click", () => {
+    state.colorSettings.rotationHueStart = "fixed";
+    syncColorUI();
+  });
+  elements.rotationHueParent.addEventListener("click", () => {
+    state.colorSettings.rotationHueStart = "parent";
+    syncColorUI();
+  });
+  elements.rotationFixedHue.addEventListener("input", (event) => {
+    const { h } = hexToHsl(event.target.value);
+    state.colorSettings.rotationFixedHue = h;
+  });
+  elements.rotationDelta.addEventListener("change", (event) => {
+    const val = clamp(Number(event.target.value) || 0, -180, 180);
+    state.colorSettings.rotationDelta = val;
+    elements.rotationDelta.value = String(val);
+  });
+
+  // ─── Tools panel ────────────────────────────────────────────────────────
+  elements.toggleToolsPanel.addEventListener("click", () => {
+    state.toolsPanelOpen = !state.toolsPanelOpen;
+    syncToolsUI();
+  });
+  elements.toolPencil.addEventListener("click", () => { state.tool = "pencil"; syncToolsUI(); });
+  elements.toolEraser.addEventListener("click", () => { state.tool = "eraser"; syncToolsUI(); });
+  elements.toolSelect.addEventListener("click", () => { state.tool = "select"; syncToolsUI(); });
+  elements.toolCopy.addEventListener("click", () => copySelection(false));
+  elements.toolCut.addEventListener("click", () => copySelection(true));
+  elements.toolPaste.addEventListener("click", () => {
+    if (!state.clipboard) return;
+    state.tool = "paste";
+    syncToolsUI();
+  });
+
   canvas.addEventListener("pointerdown", handlePointerDown);
   canvas.addEventListener("pointermove", handlePointerMove);
   window.addEventListener("pointerup", stopPainting);
@@ -1510,10 +2236,15 @@ function init() {
   elements.rowsInput.value = String(state.rows);
   elements.colsInput.value = String(state.cols);
   elements.voronoiJitter.value = String(Math.round(state.voronoiJitter * 100));
+  elements.rotationFixedHue.value = hueToHex(state.colorSettings.rotationFixedHue);
+  elements.rotationDelta.value = String(state.colorSettings.rotationDelta);
+  elements.colorLightness.value = String(Math.round(state.colorSettings.lightness * 100));
   syncSidebar();
   bindEvents();
   rebuildTopology();
   randomizeState();
+  syncColorUI();
+  syncToolsUI();
   syncLabels();
   animationFrame = window.requestAnimationFrame(animate);
 }

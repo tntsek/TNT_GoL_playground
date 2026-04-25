@@ -519,3 +519,47 @@ button:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
+
+.color-legend {
+  display: grid;
+  grid-template-columns: 16px 1fr 16px 1fr;
+  gap: 6px 8px;
+  align-items: center;
+  font-size: 0.7rem;
+  color: var(--ink-muted);
+  padding-top: 4px;
+}
+
+.color-legend .swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid var(--line-strong);
+}
+
+input[type="color"] {
+  width: 100%;
+  min-height: 32px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 2px 4px;
+  background: var(--input-bg);
+  cursor: pointer;
+}
+
+#toggle-color-panel.active,
+#toggle-tools-panel.active {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent-strong);
+}
+
+canvas#life-canvas.tool-select {
+  cursor: crosshair;
+}
+canvas#life-canvas.tool-eraser {
+  cursor: cell;
+}
+canvas#life-canvas.tool-paste {
+  cursor: copy;
+}
