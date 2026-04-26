@@ -6,6 +6,7 @@ Conway's Game of Life playground with multiple geometries:
 - Triangle
 - Rhombus
 - Penrose
+- Einstein
 - Hex
 - Trihex
 - Octagon

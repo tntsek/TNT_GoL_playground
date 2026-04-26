@@ -14,7 +14,7 @@ const TRI_DN_OFFSETS = [
   [1, -1], [1, 0], [1, 1],
 ];
 
-const TILING_TYPES = new Set(["rhombus", "penrose", "hex", "trihex", "oct", "voronoi"]);
+const TILING_TYPES = new Set(["rhombus", "penrose", "einstein", "hex", "trihex", "oct", "voronoi"]);
 
 const canvas = document.querySelector("#life-canvas");
 const ctx = canvas.getContext("2d");
@@ -53,6 +53,7 @@ const elements = {
   voronoiManhattan: document.querySelector("#voronoi-manhattan"),
   voronoiJitter: document.querySelector("#voronoi-jitter"),
   voronoiJitterValue: document.querySelector("#voronoi-jitter-value"),
+  fredkinToggle: document.querySelector("#fredkin-toggle"),
 };
 
 const state = {
@@ -78,6 +79,9 @@ const state = {
   colorsSwapped: false,
   history: [],
   gen0Snapshot: null,
+  secondOrder: false,
+  prevGrid: null,
+  prevTilingStates: null,
 };
 const HISTORY_LIMIT = 200;
 
@@ -329,6 +333,246 @@ function generatePenroseTiling(subdivisions = 5) {
     polys.push(orderPolygon([a, b, a2, c]));
     faceTypes.push(color === 1 ? 0 : 1);
   });
+
+  const [normalized, bbox] = normalizeTiling(polys);
+  return [normalized, faceTypes, bbox];
+}
+
+function generateEinsteinTiling(levels = 3) {
+  // Hat monotile substitution adapted from Craig S. Kaplan's BSD-licensed
+  // hatviz construction. It returns only the final hat polygons.
+  const r3 = Math.sqrt(3);
+  const hr3 = r3 / 2;
+  const ident = [1, 0, 0, 0, 1, 0];
+  const add2 = ([ax, ay], [bx, by]) => [ax + bx, ay + by];
+  const sub2 = ([ax, ay], [bx, by]) => [ax - bx, ay - by];
+  const scl2 = ([x, y], factor) => [x * factor, y * factor];
+  const hexPt = (x, y) => [x + 0.5 * y, hr3 * y];
+  const inv = (T) => {
+    const det = T[0] * T[4] - T[1] * T[3];
+    return [
+      T[4] / det,
+      -T[1] / det,
+      (T[1] * T[5] - T[2] * T[4]) / det,
+      -T[3] / det,
+      T[0] / det,
+      (T[2] * T[3] - T[0] * T[5]) / det,
+    ];
+  };
+  const mul = (A, B) => [
+    A[0] * B[0] + A[1] * B[3],
+    A[0] * B[1] + A[1] * B[4],
+    A[0] * B[2] + A[1] * B[5] + A[2],
+    A[3] * B[0] + A[4] * B[3],
+    A[3] * B[1] + A[4] * B[4],
+    A[3] * B[2] + A[4] * B[5] + A[5],
+  ];
+  const trot = (a) => [Math.cos(a), -Math.sin(a), 0, Math.sin(a), Math.cos(a), 0];
+  const ttrans = ([x, y]) => [1, 0, x, 0, 1, y];
+  const transPt = (M, [x, y]) => [M[0] * x + M[1] * y + M[2], M[3] * x + M[4] * y + M[5]];
+  const rotAbout = (p, angle) => mul(ttrans(p), mul(trot(angle), ttrans([-p[0], -p[1]])));
+  const matchSeg = (p, q) => [q[0] - p[0], p[1] - q[1], p[0], q[1] - p[1], q[0] - p[0], p[1]];
+  const matchTwo = (p1, q1, p2, q2) => mul(matchSeg(p2, q2), inv(matchSeg(p1, q1)));
+  const intersect = (p1, q1, p2, q2) => {
+    const d = (q2[1] - p2[1]) * (q1[0] - p1[0]) - (q2[0] - p2[0]) * (q1[1] - p1[1]);
+    const uA = ((q2[0] - p2[0]) * (p1[1] - p2[1]) - (q2[1] - p2[1]) * (p1[0] - p2[0])) / d;
+    return [p1[0] + uA * (q1[0] - p1[0]), p1[1] + uA * (q1[1] - p1[1])];
+  };
+
+  class Geom {
+    constructor(shape, fill = 0) {
+      this.shape = shape;
+      this.fill = fill;
+      this.width = 1;
+      this.children = [];
+    }
+
+    addChild(T, geom) {
+      this.children.push({ T, geom });
+    }
+
+    evalChild(childIndex, pointIndex) {
+      const child = this.children[childIndex];
+      return transPt(child.T, child.geom.shape[pointIndex]);
+    }
+
+    recenter() {
+      let tr = this.shape.reduce((acc, point) => add2(acc, point), [0, 0]);
+      tr = scl2(tr, -1 / this.shape.length);
+      this.shape = this.shape.map((point) => add2(point, tr));
+      const M = ttrans(tr);
+      this.children.forEach((child) => {
+        child.T = mul(M, child.T);
+      });
+    }
+  }
+
+  const hatOutline = [
+    hexPt(0, 0), hexPt(-1, -1), hexPt(0, -2), hexPt(2, -2),
+    hexPt(2, -1), hexPt(4, -2), hexPt(5, -1), hexPt(4, 0),
+    hexPt(3, 0), hexPt(2, 2), hexPt(0, 3), hexPt(0, 2),
+    hexPt(-1, 2),
+  ];
+  const H1Hat = new Geom(hatOutline, 0);
+  const HHat = new Geom(hatOutline, 1);
+  const THat = new Geom(hatOutline, 2);
+  const PHat = new Geom(hatOutline, 3);
+  const FHat = new Geom(hatOutline, 4);
+
+  function constructPatch(H, T, P, F) {
+    const rules = [
+      ["H"],
+      [0, 0, "P", 2],
+      [1, 0, "H", 2],
+      [2, 0, "P", 2],
+      [3, 0, "H", 2],
+      [4, 4, "P", 2],
+      [0, 4, "F", 3],
+      [2, 4, "F", 3],
+      [4, 1, 3, 2, "F", 0],
+      [8, 3, "H", 0],
+      [9, 2, "P", 0],
+      [10, 2, "H", 0],
+      [11, 4, "P", 2],
+      [12, 0, "H", 2],
+      [13, 0, "F", 3],
+      [14, 2, "F", 1],
+      [15, 3, "H", 4],
+      [8, 2, "F", 1],
+      [17, 3, "H", 0],
+      [18, 2, "P", 0],
+      [19, 2, "H", 2],
+      [20, 4, "F", 3],
+      [20, 0, "P", 2],
+      [22, 0, "H", 2],
+      [23, 4, "F", 3],
+      [23, 0, "F", 3],
+      [16, 0, "P", 2],
+      [9, 4, 0, 2, "T", 2],
+      [4, 0, "F", 3],
+    ];
+    const ret = new Geom([], null);
+    ret.width = H.width;
+    const shapes = { H, T, P, F };
+    rules.forEach((rule) => {
+      if (rule.length === 1) {
+        ret.addChild(ident, shapes[rule[0]]);
+      } else if (rule.length === 4) {
+        const base = ret.children[rule[0]];
+        const poly = base.geom.shape;
+        const p = transPt(base.T, poly[(rule[1] + 1) % poly.length]);
+        const q = transPt(base.T, poly[rule[1]]);
+        const nextShape = shapes[rule[2]];
+        const nextPoly = nextShape.shape;
+        ret.addChild(matchTwo(nextPoly[rule[3]], nextPoly[(rule[3] + 1) % nextPoly.length], p, q), nextShape);
+      } else {
+        const childP = ret.children[rule[0]];
+        const childQ = ret.children[rule[2]];
+        const p = transPt(childQ.T, childQ.geom.shape[rule[3]]);
+        const q = transPt(childP.T, childP.geom.shape[rule[1]]);
+        const nextShape = shapes[rule[4]];
+        const nextPoly = nextShape.shape;
+        ret.addChild(matchTwo(nextPoly[rule[5]], nextPoly[(rule[5] + 1) % nextPoly.length], p, q), nextShape);
+      }
+    });
+    return ret;
+  }
+
+  function constructMetatiles(patch) {
+    const bps1 = patch.evalChild(8, 2);
+    const bps2 = patch.evalChild(21, 2);
+    const rbps = transPt(rotAbout(bps1, -2 * Math.PI / 3), bps2);
+    const p72 = patch.evalChild(7, 2);
+    const p252 = patch.evalChild(25, 2);
+    const llc = intersect(bps1, rbps, patch.evalChild(6, 2), p72);
+
+    let w = sub2(patch.evalChild(6, 2), llc);
+    const newHOutline = [llc, bps1];
+    w = transPt(trot(-Math.PI / 3), w);
+    newHOutline.push(add2(newHOutline[1], w));
+    newHOutline.push(patch.evalChild(14, 2));
+    w = transPt(trot(-Math.PI / 3), w);
+    newHOutline.push(sub2(newHOutline[3], w));
+    newHOutline.push(patch.evalChild(6, 2));
+    const newH = new Geom(newHOutline);
+    newH.width = patch.width * 2;
+    [0, 9, 16, 27, 26, 6, 1, 8, 10, 15].forEach((child) => {
+      newH.addChild(patch.children[child].T, patch.children[child].geom);
+    });
+
+    const newP = new Geom([p72, add2(p72, sub2(bps1, llc)), bps1, llc]);
+    newP.width = patch.width * 2;
+    [7, 2, 3, 4, 28].forEach((child) => {
+      newP.addChild(patch.children[child].T, patch.children[child].geom);
+    });
+
+    const newF = new Geom([
+      bps2,
+      patch.evalChild(24, 2),
+      patch.evalChild(25, 0),
+      p252,
+      add2(p252, sub2(llc, bps1)),
+    ]);
+    newF.width = patch.width * 2;
+    [21, 20, 22, 23, 24, 25].forEach((child) => {
+      newF.addChild(patch.children[child].T, patch.children[child].geom);
+    });
+
+    const AAA = newHOutline[2];
+    const BBB = add2(newHOutline[1], sub2(newHOutline[4], newHOutline[5]));
+    const CCC = transPt(rotAbout(BBB, -Math.PI / 3), AAA);
+    const newT = new Geom([BBB, CCC, AAA]);
+    newT.width = patch.width * 2;
+    newT.addChild(patch.children[11].T, patch.children[11].geom);
+
+    [newH, newP, newF, newT].forEach((geom) => geom.recenter());
+    return [newH, newT, newP, newF];
+  }
+
+  const HOutline = [[0, 0], [4, 0], [4.5, hr3], [2.5, 5 * hr3], [1.5, 5 * hr3], [-0.5, hr3]];
+  const HInit = new Geom(HOutline);
+  HInit.width = 2;
+  HInit.addChild(matchTwo(hatOutline[5], hatOutline[7], HOutline[5], HOutline[0]), HHat);
+  HInit.addChild(matchTwo(hatOutline[9], hatOutline[11], HOutline[1], HOutline[2]), HHat);
+  HInit.addChild(matchTwo(hatOutline[5], hatOutline[7], HOutline[3], HOutline[4]), HHat);
+  HInit.addChild(mul(ttrans([2.5, hr3]), mul([-0.5, -hr3, 0, hr3, -0.5, 0], [0.5, 0, 0, 0, -0.5, 0])), H1Hat);
+
+  const TOutline = [[0, 0], [3, 0], [1.5, 3 * hr3]];
+  const TInit = new Geom(TOutline);
+  TInit.width = 2;
+  TInit.addChild([0.5, 0, 0.5, 0, 0.5, hr3], THat);
+
+  const POutline = [[0, 0], [4, 0], [3, 2 * hr3], [-1, 2 * hr3]];
+  const PInit = new Geom(POutline);
+  PInit.width = 2;
+  PInit.addChild([0.5, 0, 1.5, 0, 0.5, hr3], PHat);
+  PInit.addChild(mul(ttrans([0, 2 * hr3]), mul([0.5, hr3, 0, -hr3, 0.5, 0], [0.5, 0, 0, 0, 0.5, 0])), PHat);
+
+  const FOutline = [[0, 0], [3, 0], [3.5, hr3], [3, 2 * hr3], [-1, 2 * hr3]];
+  const FInit = new Geom(FOutline);
+  FInit.width = 2;
+  FInit.addChild([0.5, 0, 1.5, 0, 0.5, hr3], FHat);
+  FInit.addChild(mul(ttrans([0, 2 * hr3]), mul([0.5, hr3, 0, -hr3, 0.5, 0], [0.5, 0, 0, 0, 0.5, 0])), FHat);
+
+  let tiles = [HInit, TInit, PInit, FInit];
+  for (let i = 0; i < levels; i += 1) {
+    tiles = constructMetatiles(constructPatch(...tiles));
+  }
+
+  const polys = [];
+  const faceTypes = [];
+  const queue = [{ T: ident, geom: tiles[0], level: levels }];
+  while (queue.length) {
+    const item = queue.pop();
+    if (item.level >= 0) {
+      item.geom.children.forEach((child) => {
+        queue.push({ T: mul(item.T, child.T), geom: child.geom, level: item.level - 1 });
+      });
+    } else {
+      polys.push(item.geom.shape.map((point) => transPt(item.T, point)));
+      faceTypes.push(item.geom.fill ?? 0);
+    }
+  }
 
   const [normalized, bbox] = normalizeTiling(polys);
   return [normalized, faceTypes, bbox];
@@ -830,6 +1074,10 @@ function rebuildTopology() {
       const dim = Math.max(state.rows, state.cols);
       const subdivisions = dim <= 32 ? 4 : dim <= 64 ? 5 : dim <= 128 ? 6 : 7;
       [polys, faceTypes, bbox] = generatePenroseTiling(subdivisions);
+    } else if (state.gridType === "einstein") {
+      const dim = Math.max(state.rows, state.cols);
+      const levels = dim <= 32 ? 2 : dim <= 128 ? 3 : 4;
+      [polys, faceTypes, bbox] = generateEinsteinTiling(levels);
     } else if (state.gridType === "hex") {
       [polys, faceTypes, bbox] = generateHexTiling(
         Math.max(4, Math.floor(state.rows / 2)),
@@ -865,14 +1113,24 @@ function rebuildTopology() {
   // Topology changed: previous snapshots would have stale cell counts.
   state.history = [];
   state.gen0Snapshot = null;
+  state.prevGrid = null;
+  state.prevTilingStates = null;
   syncLabels();
 }
 
 function snapshotCurrent() {
   if (isTiling()) {
-    return { type: "tiling", data: state.tilingStates.slice() };
+    return {
+      type: "tiling",
+      data: state.tilingStates.slice(),
+      prev: state.prevTilingStates ? state.prevTilingStates.slice() : null,
+    };
   }
-  return { type: "grid", data: state.grid.map((row) => row.slice()) };
+  return {
+    type: "grid",
+    data: state.grid.map((row) => row.slice()),
+    prev: state.prevGrid ? state.prevGrid.map((row) => row.slice()) : null,
+  };
 }
 
 function restoreSnapshot(snap) {
@@ -881,10 +1139,12 @@ function restoreSnapshot(snap) {
   }
   if (snap.type === "tiling" && isTiling() && snap.data.length === state.tilingStates.length) {
     state.tilingStates = snap.data.slice();
+    state.prevTilingStates = snap.prev ? snap.prev.slice() : null;
     return true;
   }
   if (snap.type === "grid" && !isTiling()) {
     state.grid = snap.data.map((row) => row.slice());
+    state.prevGrid = snap.prev ? snap.prev.map((row) => row.slice()) : null;
     return true;
   }
   return false;
@@ -895,6 +1155,11 @@ function captureGenZero() {
   state.history = [];
 }
 
+function clearPrevState() {
+  state.prevGrid = null;
+  state.prevTilingStates = null;
+}
+
 function randomizeState() {
   state.generation = 0;
   if (isTiling()) {
@@ -902,6 +1167,7 @@ function randomizeState() {
   } else {
     state.grid = state.grid.map((row) => row.map(() => (Math.random() < state.density ? 1 : 0)));
   }
+  clearPrevState();
   captureGenZero();
   syncLabels();
 }
@@ -913,6 +1179,7 @@ function clearState() {
   } else {
     state.grid = makeGrid(state.rows, state.cols, 0);
   }
+  clearPrevState();
   captureGenZero();
   syncLabels();
 }
@@ -925,6 +1192,7 @@ function invertState() {
   }
   // Inverting resets the starting-point: the inverted state becomes gen 0.
   state.generation = 0;
+  clearPrevState();
   captureGenZero();
   syncLabels();
 }
@@ -941,11 +1209,47 @@ function resetToGenZero() {
   if (restoreSnapshot(state.gen0Snapshot)) {
     state.generation = 0;
     state.history = [];
+    // Gen 0 has no prior step; snapshot.prev is ignored for semantics.
+    clearPrevState();
     syncLabels();
   }
 }
 
+function inverseFredkinStep() {
+  // Fredkin forward: (prev, cur) -> (cur, Conway(cur) XOR prev).
+  // Inverse:        (prev, cur) -> (Conway(prev) XOR cur, prev).
+  // Missing prev is treated as all-dead.
+  if (isTiling()) {
+    const cur = state.tilingStates;
+    const prevArr = state.prevTilingStates || new Array(cur.length).fill(0);
+    const conwayOfPrev = stepTiling(prevArr, state.tilingNeighbors);
+    const newPrev = conwayOfPrev.map((v, i) => v ^ cur[i]);
+    state.tilingStates = prevArr.slice();
+    state.prevTilingStates = newPrev;
+  } else {
+    const cur = state.grid;
+    const prevArr = state.prevGrid || makeGrid(state.rows, state.cols, 0);
+    const conwayOfPrev = state.gridType === "triangle"
+      ? stepGridTri(prevArr, state.wrap)
+      : stepGrid(prevArr, state.wrap);
+    const newPrev = conwayOfPrev.map((row, r) => row.map((v, c) => v ^ cur[r][c]));
+    state.grid = prevArr.map((row) => row.slice());
+    state.prevGrid = newPrev;
+  }
+}
+
 function stepBack() {
+  if (state.secondOrder) {
+    // Reversible: apply the inverse rule and ignore history. This keeps
+    // edits intact and lets us run backward past gen 0.
+    inverseFredkinStep();
+    state.generation -= 1;
+    // History snapshots are tied to the forward timeline; diverging from it
+    // via the inverse rule makes them stale for Back-from-here.
+    state.history = [];
+    syncLabels();
+    return;
+  }
   if (state.history.length === 0) {
     return;
   }
@@ -977,11 +1281,31 @@ function stepOnce() {
     state.history.shift();
   }
   if (isTiling()) {
-    state.tilingStates = stepTiling(state.tilingStates, state.tilingNeighbors);
-  } else if (state.gridType === "triangle") {
-    state.grid = stepGridTri(state.grid, state.wrap);
+    const nextStd = stepTiling(state.tilingStates, state.tilingNeighbors);
+    const currentCopy = state.tilingStates.slice();
+    let next = nextStd;
+    if (state.secondOrder) {
+      const prev = state.prevTilingStates;
+      if (prev && prev.length === nextStd.length) {
+        next = nextStd.map((v, i) => v ^ prev[i]);
+      }
+    }
+    state.prevTilingStates = currentCopy;
+    state.tilingStates = next;
   } else {
-    state.grid = stepGrid(state.grid, state.wrap);
+    const nextStd = state.gridType === "triangle"
+      ? stepGridTri(state.grid, state.wrap)
+      : stepGrid(state.grid, state.wrap);
+    const currentCopy = state.grid.map((row) => row.slice());
+    let next = nextStd;
+    if (state.secondOrder) {
+      const prev = state.prevGrid;
+      if (prev && prev.length === nextStd.length && prev[0].length === nextStd[0].length) {
+        next = nextStd.map((row, r) => row.map((v, c) => v ^ prev[r][c]));
+      }
+    }
+    state.prevGrid = currentCopy;
+    state.grid = next;
   }
   state.generation += 1;
   syncLabels();
@@ -1060,6 +1384,9 @@ function gridColors() {
   }
   if (state.gridType === "penrose") {
     return { alive: ["#5c89b8", "#d7a44d"], dead };
+  }
+  if (state.gridType === "einstein") {
+    return { alive: ["#73b7c9", "#e5b65d", "#cf6f5f", "#8fb46a"], dead };
   }
   if (state.gridType === "trihex") {
     return { alive: ["#d8a862", "#4fb0b8"], dead };
@@ -1179,7 +1506,7 @@ function syncLabels() {
   elements.speedValue.textContent = String(state.speed);
   elements.densityValue.textContent = `${Math.round(state.density * 100)}%`;
   elements.thresholdValue.textContent = String(state.threshold);
-  elements.stepBack.disabled = state.history.length === 0;
+  elements.stepBack.disabled = !state.secondOrder && state.history.length === 0;
   elements.resetGenZero.disabled = state.generation === 0 || !state.gen0Snapshot;
   elements.swapColors.classList.toggle("active", state.colorsSwapped);
   syncVoronoiUI();
@@ -1260,6 +1587,7 @@ function applyPaint(target, value) {
   }
   // Painting at gen 0 redefines the "base" state, so keep gen0 snapshot fresh.
   if (state.generation === 0) {
+    clearPrevState();
     state.gen0Snapshot = snapshotCurrent();
     state.history = [];
   }
@@ -1277,6 +1605,9 @@ function imageSampler(image) {
   offscreen.width = size;
   offscreen.height = size;
   const offCtx = offscreen.getContext("2d");
+  // Fill white so images with alpha don't read as zero brightness.
+  offCtx.fillStyle = "#ffffff";
+  offCtx.fillRect(0, 0, size, size);
   offCtx.drawImage(image, 0, 0, size, size);
   const data = offCtx.getImageData(0, 0, size, size).data;
   return (normX, normY) => {
@@ -1327,16 +1658,243 @@ function applyImageToCurrentGeometry(image) {
       }
     }
   }
+  clearPrevState();
   captureGenZero();
   syncLabels();
 }
 
-function saveCanvasSnapshot() {
+// ── Scene persistence via PNG tEXt chunk ─────────────────────────────────────
+
+const SCENE_PNG_KEYWORD = "tntgol-scene";
+const PNG_SIG = [137, 80, 78, 71, 13, 10, 26, 10];
+
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n += 1) {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) {
+      c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    }
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32(bytes, start, end) {
+  let c = 0xffffffff;
+  for (let i = start; i < end; i += 1) {
+    c = (CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8)) >>> 0;
+  }
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function writeU32BE(out, offset, value) {
+  out[offset] = (value >>> 24) & 0xff;
+  out[offset + 1] = (value >>> 16) & 0xff;
+  out[offset + 2] = (value >>> 8) & 0xff;
+  out[offset + 3] = value & 0xff;
+}
+
+function readU32BE(bytes, offset) {
+  return (bytes[offset] * 0x1000000)
+    + ((bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3]);
+}
+
+function isPngSignature(bytes) {
+  if (!bytes || bytes.length < 8) return false;
+  for (let i = 0; i < 8; i += 1) {
+    if (bytes[i] !== PNG_SIG[i]) return false;
+  }
+  return true;
+}
+
+function makeTextChunk(keyword, text) {
+  const enc = new TextEncoder();
+  const kw = enc.encode(keyword);
+  const txt = enc.encode(text);
+  const dataLen = kw.length + 1 + txt.length;
+  const out = new Uint8Array(12 + dataLen);
+  writeU32BE(out, 0, dataLen);
+  out[4] = 0x74; out[5] = 0x45; out[6] = 0x58; out[7] = 0x74; // "tEXt"
+  out.set(kw, 8);
+  out[8 + kw.length] = 0;
+  out.set(txt, 8 + kw.length + 1);
+  writeU32BE(out, 8 + dataLen, crc32(out, 4, 8 + dataLen));
+  return out;
+}
+
+function injectPngText(pngBytes, keyword, text) {
+  if (!isPngSignature(pngBytes)) return pngBytes;
+  // IHDR is always the first chunk: 4 length + 4 type + 13 data + 4 CRC = 25 bytes.
+  const cut = 8 + 25;
+  if (pngBytes.length < cut) return pngBytes;
+  const chunk = makeTextChunk(keyword, text);
+  const out = new Uint8Array(pngBytes.length + chunk.length);
+  out.set(pngBytes.subarray(0, cut), 0);
+  out.set(chunk, cut);
+  out.set(pngBytes.subarray(cut), cut + chunk.length);
+  return out;
+}
+
+function extractPngText(pngBytes, keyword) {
+  if (!isPngSignature(pngBytes)) return null;
+  const kwBytes = new TextEncoder().encode(keyword);
+  const decoder = new TextDecoder();
+  let offset = 8;
+  while (offset + 12 <= pngBytes.length) {
+    const len = readU32BE(pngBytes, offset);
+    const type = String.fromCharCode(
+      pngBytes[offset + 4], pngBytes[offset + 5],
+      pngBytes[offset + 6], pngBytes[offset + 7],
+    );
+    const dataStart = offset + 8;
+    if (dataStart + len + 4 > pngBytes.length) return null;
+    if (type === "tEXt" && len >= kwBytes.length + 1) {
+      let match = true;
+      for (let k = 0; k < kwBytes.length; k += 1) {
+        if (pngBytes[dataStart + k] !== kwBytes[k]) { match = false; break; }
+      }
+      if (match && pngBytes[dataStart + kwBytes.length] === 0) {
+        return decoder.decode(pngBytes.subarray(dataStart + kwBytes.length + 1, dataStart + len));
+      }
+    }
+    if (type === "IEND") return null;
+    offset = dataStart + len + 4;
+  }
+  return null;
+}
+
+// ── Scene <-> JSON ───────────────────────────────────────────────────────────
+
+function packBits(arr) {
+  let s = "";
+  for (let i = 0; i < arr.length; i += 1) s += arr[i] ? "1" : "0";
+  return s;
+}
+
+function unpackBits(str) {
+  const n = str.length;
+  const a = new Array(n);
+  for (let i = 0; i < n; i += 1) a[i] = str.charCodeAt(i) === 49 ? 1 : 0;
+  return a;
+}
+
+function packGrid(grid) {
+  return grid.map(packBits).join("");
+}
+
+function unpackGrid(str, rows, cols) {
+  const g = new Array(rows);
+  for (let r = 0; r < rows; r += 1) {
+    const row = new Array(cols);
+    const base = r * cols;
+    for (let c = 0; c < cols; c += 1) row[c] = str.charCodeAt(base + c) === 49 ? 1 : 0;
+    g[r] = row;
+  }
+  return g;
+}
+
+function captureSceneJSON() {
+  const scene = {
+    version: 1,
+    gridType: state.gridType,
+    rows: state.rows,
+    cols: state.cols,
+    wrap: state.wrap,
+    voronoiSeed: state.voronoiSeed,
+    voronoiMetric: state.voronoiMetric,
+    voronoiJitter: state.voronoiJitter,
+    secondOrder: state.secondOrder,
+    colorsSwapped: state.colorsSwapped,
+  };
+  if (isTiling()) {
+    scene.tilingStates = packBits(state.tilingStates);
+    if (state.prevTilingStates) scene.prevTilingStates = packBits(state.prevTilingStates);
+  } else {
+    scene.grid = packGrid(state.grid);
+    if (state.prevGrid) scene.prevGrid = packGrid(state.prevGrid);
+  }
+  return JSON.stringify(scene);
+}
+
+function applySceneJSON(json) {
+  let scene;
+  try { scene = JSON.parse(json); } catch (e) { return false; }
+  if (!scene || typeof scene !== "object") return false;
+
+  state.gridType = scene.gridType ?? state.gridType;
+  state.rows = scene.rows ?? state.rows;
+  state.cols = scene.cols ?? state.cols;
+  state.wrap = scene.wrap ?? state.wrap;
+  state.voronoiSeed = scene.voronoiSeed ?? state.voronoiSeed;
+  state.voronoiMetric = scene.voronoiMetric ?? state.voronoiMetric;
+  state.voronoiJitter = scene.voronoiJitter ?? state.voronoiJitter;
+  state.secondOrder = !!scene.secondOrder;
+  state.colorsSwapped = !!scene.colorsSwapped;
+
+  elements.gridType.value = state.gridType;
+  elements.rowsInput.value = String(state.rows);
+  elements.colsInput.value = String(state.cols);
+  elements.wrapToggle.checked = state.wrap;
+  elements.voronoiJitter.value = String(Math.round(state.voronoiJitter * 100));
+  elements.fredkinToggle.checked = state.secondOrder;
+
+  rebuildTopology();
+
+  if (isTiling()) {
+    if (typeof scene.tilingStates === "string"
+        && scene.tilingStates.length === state.tilingStates.length) {
+      state.tilingStates = unpackBits(scene.tilingStates);
+    }
+    if (typeof scene.prevTilingStates === "string"
+        && scene.prevTilingStates.length === state.tilingStates.length) {
+      state.prevTilingStates = unpackBits(scene.prevTilingStates);
+    }
+  } else {
+    const expected = state.rows * state.cols;
+    if (typeof scene.grid === "string" && scene.grid.length === expected) {
+      state.grid = unpackGrid(scene.grid, state.rows, state.cols);
+    }
+    if (typeof scene.prevGrid === "string" && scene.prevGrid.length === expected) {
+      state.prevGrid = unpackGrid(scene.prevGrid, state.rows, state.cols);
+    }
+  }
+
+  state.generation = 0;
+  state.history = [];
+  state.gen0Snapshot = snapshotCurrent();
+  syncLabels();
+  return true;
+}
+
+// ── Save / load ──────────────────────────────────────────────────────────────
+
+async function saveCanvasSnapshot() {
   render();
+  // Capture JSON in the same sync tick as render so the embedded scene
+  // matches the pixels even if the simulation is playing.
+  const sceneJson = captureSceneJSON();
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+  if (!blob) return;
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const withScene = injectPngText(bytes, SCENE_PNG_KEYWORD, sceneJson);
+  const outBlob = new Blob([withScene], { type: "image/png" });
+  const url = URL.createObjectURL(outBlob);
   const link = document.createElement("a");
-  link.href = canvas.toDataURL("image/png");
+  link.href = url;
   link.download = "tnt-gol-playground.png";
   link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function handleImportFile(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const sceneText = extractPngText(bytes, SCENE_PNG_KEYWORD);
+  if (sceneText && applySceneJSON(sceneText)) {
+    return;
+  }
+  const image = await loadImageFromFile(file);
+  applyImageToCurrentGeometry(image);
 }
 
 function loadImageFromFile(file) {
@@ -1476,20 +2034,25 @@ function bindEvents() {
     state.threshold = Number(event.target.value);
     syncLabels();
   });
+  elements.fredkinToggle.addEventListener("change", (event) => {
+    state.secondOrder = event.target.checked;
+    // prev is tracked continuously in stepOnce regardless of this flag, so
+    // toggling just switches whether the XOR is applied — no state reset.
+    syncLabels();
+  });
   elements.invertGrid.addEventListener("click", invertState);
   elements.snapshotImage.addEventListener("click", saveCanvasSnapshot);
   elements.imageInput.addEventListener("change", async (event) => {
     const [file] = event.target.files || [];
-    if (!file) {
-      return;
-    }
+    if (!file) return;
     try {
-      const image = await loadImageFromFile(file);
-      applyImageToCurrentGeometry(image);
+      await handleImportFile(file);
       render();
     } catch (error) {
       console.error(error);
     }
+    // Clear so re-selecting the same file fires change again.
+    event.target.value = "";
   });
 
   canvas.addEventListener("pointerdown", handlePointerDown);
@@ -1510,6 +2073,7 @@ function init() {
   elements.rowsInput.value = String(state.rows);
   elements.colsInput.value = String(state.cols);
   elements.voronoiJitter.value = String(Math.round(state.voronoiJitter * 100));
+  elements.fredkinToggle.checked = state.secondOrder;
   syncSidebar();
   bindEvents();
   rebuildTopology();

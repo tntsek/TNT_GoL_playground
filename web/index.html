@@ -69,6 +69,7 @@
               <option value="triangle">Triangle</option>
               <option value="rhombus">Rhombus</option>
               <option value="penrose" selected>Penrose</option>
+              <option value="einstein">Einstein</option>
               <option value="hex">Hex</option>
               <option value="trihex">Trihex</option>
               <option value="oct">Octagon</option>
@@ -94,6 +95,14 @@
           <div class="button-row">
             <button id="apply-size">Apply Size</button>
             <button id="rebuild-map" data-tooltip="Randomizes polygon positions for Voronoi grids; redraws the tiling for other geometries.">Rebuild</button>
+          </div>
+
+          <div class="toggle-field">
+            <label class="toggle-label">
+              <input id="fredkin-toggle" type="checkbox" />
+              <span>Fredkin (2nd order)</span>
+            </label>
+            <button type="button" class="info-btn" data-tooltip="Second-order reversible rule. Next state = standard life step XOR state from one generation ago. Back undoes steps exactly.">?</button>
           </div>
 
           <div id="voronoi-options" class="voronoi-options" hidden>
