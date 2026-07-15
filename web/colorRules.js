@@ -39,6 +39,24 @@ export function defaultColorSettings() {
     rotationFixedHue: 0, // degrees
     rotationDelta: 15, // degrees per generation
     lightness: 0.5, // 0..1
+    // Death fade. 0 = immediate death (default Conway behavior). N>0 means a
+    // cell that Conway would kill instead enters an N-step fade phase: each
+    // generation it loses fadeStartSat/N of saturation. After N steps, dies.
+    deathFadeSteps: 0,
+    // When true, cells in the fade phase freeze their hue (they don't rotate
+    // under RULESETS.ROTATION). They still lose saturation.
+    freezeHueDying: false,
+    // Ghosts: after a cell dies, its grid position holds a fading colored
+    // "ghost" for `ghostFadeSteps` generations. Ghosts don't count toward
+    // population and don't participate in Conway's neighbor count. Setting
+    // 0 disables ghosting.
+    ghostFadeSteps: 0,
+    // When true, dead cells with an active ghost cannot birth — the spot is
+    // blocked until the ghost fully fades.
+    blockGhostBirths: false,
+    // When true, every cell that dies turns its position into a hole
+    // (permanent wall — see state.holes). Independent of color rule.
+    deathsCreateHoles: false,
   };
 }
 
@@ -48,15 +66,34 @@ export function makeColorState(n) {
     sat: new Float32Array(n),
     age: new Uint16Array(n),
     origSat: new Float32Array(n),
+    // Fade tracking (live but dying — keeps contributing to population).
+    fadeRemaining: new Uint8Array(n),
+    fadeStart: new Uint8Array(n),
+    fadeStartSat: new Float32Array(n),
+    // Ghost tracking (cell is dead but spot still has a fading color).
+    // ghostFade[i] > 0 means an active ghost; current ghost saturation is
+    // ghostStartSat[i] * ghostFade[i] / ghostStart[i].
+    ghostFade: new Uint8Array(n),
+    ghostStart: new Uint8Array(n),
+    ghostHue: new Float32Array(n),
+    ghostStartSat: new Float32Array(n),
   };
 }
 
 export function cloneColorState(c) {
+  const n = c.hue.length;
   return {
     hue: new Float32Array(c.hue),
     sat: new Float32Array(c.sat),
     age: new Uint16Array(c.age),
     origSat: new Float32Array(c.origSat),
+    fadeRemaining: new Uint8Array(c.fadeRemaining || n),
+    fadeStart: new Uint8Array(c.fadeStart || n),
+    fadeStartSat: new Float32Array(c.fadeStartSat || n),
+    ghostFade: new Uint8Array(c.ghostFade || n),
+    ghostStart: new Uint8Array(c.ghostStart || n),
+    ghostHue: new Float32Array(c.ghostHue || n),
+    ghostStartSat: new Float32Array(c.ghostStartSat || n),
   };
 }
 
@@ -65,6 +102,13 @@ export function clearColorState(c) {
   c.sat.fill(0);
   c.age.fill(0);
   c.origSat.fill(0);
+  if (c.fadeRemaining) c.fadeRemaining.fill(0);
+  if (c.fadeStart) c.fadeStart.fill(0);
+  if (c.fadeStartSat) c.fadeStartSat.fill(0);
+  if (c.ghostFade) c.ghostFade.fill(0);
+  if (c.ghostStart) c.ghostStart.fill(0);
+  if (c.ghostHue) c.ghostHue.fill(0);
+  if (c.ghostStartSat) c.ghostStartSat.fill(0);
 }
 
 export function clearCellColor(c, i) {
@@ -72,6 +116,13 @@ export function clearCellColor(c, i) {
   c.sat[i] = 0;
   c.age[i] = 0;
   c.origSat[i] = 0;
+  if (c.fadeRemaining) c.fadeRemaining[i] = 0;
+  if (c.fadeStart) c.fadeStart[i] = 0;
+  if (c.fadeStartSat) c.fadeStartSat[i] = 0;
+  if (c.ghostFade) c.ghostFade[i] = 0;
+  if (c.ghostStart) c.ghostStart[i] = 0;
+  if (c.ghostHue) c.ghostHue[i] = 0;
+  if (c.ghostStartSat) c.ghostStartSat[i] = 0;
 }
 
 export function setCellColor(c, i, hue, sat) {
@@ -79,6 +130,13 @@ export function setCellColor(c, i, hue, sat) {
   c.sat[i] = sat;
   c.age[i] = 0;
   c.origSat[i] = sat;
+  if (c.fadeRemaining) c.fadeRemaining[i] = 0;
+  if (c.fadeStart) c.fadeStart[i] = 0;
+  if (c.fadeStartSat) c.fadeStartSat[i] = 0;
+  if (c.ghostFade) c.ghostFade[i] = 0;
+  if (c.ghostStart) c.ghostStart[i] = 0;
+  if (c.ghostHue) c.ghostHue[i] = 0;
+  if (c.ghostStartSat) c.ghostStartSat[i] = 0;
 }
 
 export function wrapHue(h) {
@@ -118,27 +176,107 @@ export function circularMean(huesDeg) {
 // Step under an active color ruleset. Returns { nextAlive, nextColor }.
 //
 //   alive       : Uint8Array length n, 0/1
-//   color       : { hue, sat, age, origSat } typed arrays length n
+//   color       : color state typed arrays length n
 //   neighborsOf : function(i) -> array of neighbor flat indices
 //   n           : cell count
 //   settings    : color settings (see defaultColorSettings)
-export function stepColor(alive, color, neighborsOf, n, settings) {
+//   holes       : optional Uint8Array length n. holes[i] = 1 means cell is a
+//                 wall — stays dead, doesn't contribute to neighbor counts.
+export function stepColor(alive, color, neighborsOf, n, settings, holes) {
   const nextAlive = new Uint8Array(n);
   const nextColor = makeColorState(n);
   const rule = settings.rule;
+  const fadeSteps = Math.max(0, Math.floor(settings.deathFadeSteps || 0));
+  const freezeHueDying = !!settings.freezeHueDying;
+  const ghostSteps = Math.max(0, Math.floor(settings.ghostFadeSteps || 0));
+  const blockGhostBirths = !!settings.blockGhostBirths;
+
+  // Spawn a fresh ghost in nextColor at index `i` based on the just-died
+  // cell's prior color.
+  function spawnGhost(i, hue, sat) {
+    if (ghostSteps <= 0 || sat <= 0) return;
+    nextColor.ghostFade[i] = ghostSteps;
+    nextColor.ghostStart[i] = ghostSteps;
+    nextColor.ghostHue[i] = wrapHue(hue);
+    nextColor.ghostStartSat[i] = sat;
+  }
+
+  // Carry forward an existing ghost minus one step. Returns true if the
+  // ghost is still active afterward.
+  function decayGhost(i) {
+    const remaining = (color.ghostFade ? color.ghostFade[i] : 0) - 1;
+    if (remaining <= 0) return false;
+    nextColor.ghostFade[i] = remaining;
+    nextColor.ghostStart[i] = color.ghostStart ? color.ghostStart[i] : ghostSteps;
+    nextColor.ghostHue[i] = color.ghostHue ? color.ghostHue[i] : 0;
+    nextColor.ghostStartSat[i] = color.ghostStartSat ? color.ghostStartSat[i] : 0;
+    return true;
+  }
+
+  // Helper to enter or continue the fade phase for cell i.
+  // Reads from prev `color`, writes to `nextColor`. Returns true if cell is
+  // still alive after this step (i.e., still fading), false if dead.
+  function applyFade(i, hueIfAlive, freezeHue) {
+    const prevRemaining = color.fadeRemaining ? color.fadeRemaining[i] : 0;
+    let total;
+    let startSat;
+    let nextRemaining;
+    if (prevRemaining === 0) {
+      // Just entered fade.
+      total = fadeSteps;
+      startSat = color.sat[i];
+      nextRemaining = total - 1;
+    } else {
+      total = color.fadeStart[i] || fadeSteps;
+      startSat = color.fadeStartSat[i] || color.sat[i];
+      nextRemaining = prevRemaining - 1;
+    }
+    if (nextRemaining <= 0) {
+      // Last fade step → dies now.
+      return false;
+    }
+    nextAlive[i] = 1;
+    nextColor.hue[i] = wrapHue(freezeHue ? color.hue[i] : hueIfAlive);
+    nextColor.sat[i] = startSat * (nextRemaining / total);
+    nextColor.age[i] = Math.min(65535, color.age[i] + 1);
+    nextColor.origSat[i] = color.origSat[i];
+    nextColor.fadeRemaining[i] = nextRemaining;
+    nextColor.fadeStart[i] = total;
+    nextColor.fadeStartSat[i] = startSat;
+    return true;
+  }
 
   for (let i = 0; i < n; i += 1) {
+    if (holes && holes[i]) {
+      // Holes are walls — stay dead, no color, no ghost.
+      continue;
+    }
     const wasAlive = alive[i] === 1;
+    const isDying = wasAlive && color.fadeRemaining && color.fadeRemaining[i] > 0;
+    const hasGhost = color.ghostFade && color.ghostFade[i] > 0;
     const nbrs = neighborsOf(i);
     let liveCount = 0;
     for (let k = 0; k < nbrs.length; k += 1) {
-      if (alive[nbrs[k]]) liveCount += 1;
+      const j = nbrs[k];
+      if (holes && holes[j]) continue;
+      if (alive[j]) liveCount += 1;
     }
     const standardSurvive = wasAlive && (liveCount === 2 || liveCount === 3);
-    const standardBirth = !wasAlive && liveCount === 3;
+    let standardBirth = !wasAlive && liveCount === 3;
+    if (standardBirth && blockGhostBirths && hasGhost) {
+      standardBirth = false;
+    }
 
     if (rule === RULESETS.GOETHEAN) {
       if (wasAlive) {
+        // Already-fading cells continue fading regardless of Conway's mood.
+        if (isDying) {
+          if (!applyFade(i, color.hue[i], freezeHueDying)) {
+            // Fade completed → cell dies. Spawn ghost from current state.
+            spawnGhost(i, color.hue[i], color.sat[i]);
+          }
+          continue;
+        }
         const decayed = color.sat[i] - color.origSat[i] / 10;
         if (standardSurvive && decayed > 0) {
           nextAlive[i] = 1;
@@ -146,42 +284,68 @@ export function stepColor(alive, color, neighborsOf, n, settings) {
           nextColor.sat[i] = decayed;
           nextColor.age[i] = Math.min(65535, color.age[i] + 1);
           nextColor.origSat[i] = color.origSat[i];
+        } else if (fadeSteps > 0) {
+          // Conway-death OR Goethean sat-depletion → enter fade.
+          if (!applyFade(i, color.hue[i], freezeHueDying)) {
+            spawnGhost(i, color.hue[i], color.sat[i]);
+          }
+        } else {
+          // Immediate death → spawn ghost (if enabled) from current color.
+          spawnGhost(i, color.hue[i], color.sat[i]);
         }
       } else if (standardBirth) {
-        // Eligible parents: live + sat >= origSat/2
+        // Births follow standard Conway B3 — any 3 live neighbors → birth.
+        // Color of newborn is the circular mean of *eligible* parents
+        // (sat ≥ origSat/2). If no parents are eligible (all dying), fall
+        // back to the mean of all live neighbors so the cell still gets a
+        // sensible hue.
         const eligibleHues = [];
         const eligibleSats = [];
-        let warmCount = 0;
-        let coolCount = 0;
+        const fallbackHues = [];
+        const fallbackSats = [];
         for (let k = 0; k < nbrs.length; k += 1) {
           const j = nbrs[k];
           if (!alive[j]) continue;
+          fallbackHues.push(color.hue[j]);
+          fallbackSats.push(color.sat[j]);
           if (color.sat[j] < color.origSat[j] / 2) continue;
           eligibleHues.push(color.hue[j]);
           eligibleSats.push(color.sat[j]);
-          if (isWarm(color.hue[j])) warmCount += 1;
-          else coolCount += 1;
         }
-        if (warmCount >= 1 && coolCount >= 1) {
-          const mean = circularMean(eligibleHues);
-          const newHue = mean == null ? eligibleHues[0] : mean;
-          const startSat = settings.goetheanSatStart === "inherit"
-            ? eligibleSats.reduce((s, v) => s + v, 0) / eligibleSats.length
-            : 1.0;
-          nextAlive[i] = 1;
-          nextColor.hue[i] = wrapHue(newHue);
-          nextColor.sat[i] = startSat;
-          nextColor.age[i] = 0;
-          nextColor.origSat[i] = startSat;
-        }
+        const parentHues = eligibleHues.length > 0 ? eligibleHues : fallbackHues;
+        const parentSats = eligibleSats.length > 0 ? eligibleSats : fallbackSats;
+        const mean = circularMean(parentHues);
+        const newHue = mean == null ? (parentHues[0] || 0) : mean;
+        const startSat = settings.goetheanSatStart === "inherit"
+          ? parentSats.reduce((s, v) => s + v, 0) / parentSats.length
+          : 1.0;
+        nextAlive[i] = 1;
+        nextColor.hue[i] = wrapHue(newHue);
+        nextColor.sat[i] = startSat;
+        nextColor.age[i] = 0;
+        nextColor.origSat[i] = startSat;
       }
     } else if (rule === RULESETS.ROTATION) {
-      if (standardSurvive) {
-        nextAlive[i] = 1;
-        nextColor.hue[i] = wrapHue(color.hue[i] + settings.rotationDelta);
-        nextColor.sat[i] = 1.0;
-        nextColor.age[i] = Math.min(65535, color.age[i] + 1);
-        nextColor.origSat[i] = 1.0;
+      if (wasAlive) {
+        if (isDying) {
+          if (!applyFade(i, color.hue[i] + settings.rotationDelta, freezeHueDying)) {
+            spawnGhost(i, color.hue[i], color.sat[i]);
+          }
+          continue;
+        }
+        if (standardSurvive) {
+          nextAlive[i] = 1;
+          nextColor.hue[i] = wrapHue(color.hue[i] + settings.rotationDelta);
+          nextColor.sat[i] = 1.0;
+          nextColor.age[i] = Math.min(65535, color.age[i] + 1);
+          nextColor.origSat[i] = 1.0;
+        } else if (fadeSteps > 0) {
+          if (!applyFade(i, color.hue[i] + settings.rotationDelta, freezeHueDying)) {
+            spawnGhost(i, color.hue[i], color.sat[i]);
+          }
+        } else {
+          spawnGhost(i, color.hue[i], color.sat[i]);
+        }
       } else if (standardBirth) {
         let h;
         if (settings.rotationHueStart === "parent") {
@@ -202,6 +366,16 @@ export function stepColor(alive, color, neighborsOf, n, settings) {
         nextColor.origSat[i] = 1.0;
       }
     }
+  }
+
+  // Ghost-decay finalization: any cell still dead at this point that has
+  // an active ghost from the previous generation gets its ghost ticked
+  // down. Cells that just died this step already had spawnGhost called.
+  for (let i = 0; i < n; i += 1) {
+    if (holes && holes[i]) continue;
+    if (nextAlive[i]) continue;
+    if (nextColor.ghostFade[i] !== 0) continue; // freshly spawned this step
+    decayGhost(i);
   }
 
   return { nextAlive, nextColor };

@@ -7,6 +7,7 @@ import {
   clearCellColor,
   setCellColor,
   stepColor,
+  circularMean,
   wrapHue,
   hexToHsl,
   rgbToHsl,
@@ -84,10 +85,19 @@ const elements = {
   rotationFixedHueField: document.querySelector("#rotation-fixed-hue-field"),
   rotationFixedHue: document.querySelector("#rotation-fixed-hue"),
   rotationDelta: document.querySelector("#rotation-delta"),
+  deathFadeSteps: document.querySelector("#death-fade-steps"),
+  freezeHueDying: document.querySelector("#freeze-hue-dying"),
+  ghostFadeSteps: document.querySelector("#ghost-fade-steps"),
+  blockGhostBirths: document.querySelector("#block-ghost-births"),
+  deathsCreateHoles: document.querySelector("#deaths-create-holes"),
   toolsOptions: document.querySelector("#tools-options"),
-  toolPencil: document.querySelector("#tool-pencil"),
-  toolEraser: document.querySelector("#tool-eraser"),
+  toolBrush: document.querySelector("#tool-brush"),
+  toolHole: document.querySelector("#tool-hole"),
   toolSelect: document.querySelector("#tool-select"),
+  brushSize: document.querySelector("#brush-size"),
+  brushSizeValue: document.querySelector("#brush-size-value"),
+  paintColor: document.querySelector("#paint-color"),
+  paintColorField: document.querySelector("#paint-color-field"),
   toolCopy: document.querySelector("#tool-copy"),
   toolCut: document.querySelector("#tool-cut"),
   toolPaste: document.querySelector("#tool-paste"),
@@ -120,8 +130,12 @@ const state = {
   // Color rules
   colorSettings: defaultColorSettings(),
   color: makeColorState(0),
+  // Holes — flat Uint8Array of cellCount(); 1 = hole/wall (no simulation here).
+  holes: new Uint8Array(0),
   // Editor tools
-  tool: "pencil", // 'pencil' | 'eraser' | 'select'
+  tool: "brush", // 'brush' | 'select' | 'paste'
+  brushSize: 1, // 1..10 (cells in diameter)
+  paintHue: 0, // 0..360 — hue used for brush-painted cells under a color rule
   selection: null, // Set<flatIdx> | null
   selectionDrag: null, // in-progress rectangle in screen coords
   clipboard: null, // see editor-tools commit
@@ -133,7 +147,6 @@ const state = {
   secondOrder: false,
   prevGrid: null,
   prevTilingStates: null,
-  prevColorAlive: null, // flat Uint8Array — prior-generation alive bits when a color rule is active
 };
 const HISTORY_LIMIT = 200;
 
@@ -229,12 +242,16 @@ function computeTilingNeighbors(polys, tolerance = 1e-6) {
   });
 }
 
-function stepGrid(grid, wrap) {
+function stepGrid(grid, wrap, holes) {
   const rows = grid.length;
   const cols = grid[0].length;
   const next = makeGrid(rows, cols);
   for (let r = 0; r < rows; r += 1) {
     for (let c = 0; c < cols; c += 1) {
+      if (holes && holes[r * cols + c]) {
+        next[r][c] = 0;
+        continue;
+      }
       let total = 0;
       for (let dr = -1; dr <= 1; dr += 1) {
         for (let dc = -1; dc <= 1; dc += 1) {
@@ -249,6 +266,7 @@ function stepGrid(grid, wrap) {
           } else if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) {
             continue;
           }
+          if (holes && holes[nr * cols + nc]) continue;
           total += grid[nr][nc];
         }
       }
@@ -258,12 +276,16 @@ function stepGrid(grid, wrap) {
   return next;
 }
 
-function stepGridTri(grid, wrap) {
+function stepGridTri(grid, wrap, holes) {
   const rows = grid.length;
   const cols = grid[0].length;
   const next = makeGrid(rows, cols);
   for (let r = 0; r < rows; r += 1) {
     for (let c = 0; c < cols; c += 1) {
+      if (holes && holes[r * cols + c]) {
+        next[r][c] = 0;
+        continue;
+      }
       const offsets = (r + c) % 2 === 0 ? TRI_UP_OFFSETS : TRI_DN_OFFSETS;
       let total = 0;
       offsets.forEach(([dr, dc]) => {
@@ -275,6 +297,7 @@ function stepGridTri(grid, wrap) {
         } else if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) {
           return;
         }
+        if (holes && holes[nr * cols + nc]) return;
         total += grid[nr][nc];
       });
       next[r][c] = grid[r][c] ? Number(total === 2 || total === 3) : Number(total === 3);
@@ -283,9 +306,16 @@ function stepGridTri(grid, wrap) {
   return next;
 }
 
-function stepTiling(states, neighbors) {
+function stepTiling(states, neighbors, holes) {
   return states.map((alive, index) => {
-    const total = neighbors[index].reduce((sum, neighbor) => sum + states[neighbor], 0);
+    if (holes && holes[index]) return 0;
+    let total = 0;
+    const nbrs = neighbors[index];
+    for (let k = 0; k < nbrs.length; k += 1) {
+      const j = nbrs[k];
+      if (holes && holes[j]) continue;
+      total += states[j];
+    }
     return alive ? Number(total === 2 || total === 3) : Number(total === 3);
   });
 }
@@ -1168,6 +1198,7 @@ function rebuildTopology() {
   state.selection = null;
   resizeColorState();
   clearPrevState();
+  resizeHoles();
   syncLabels();
 }
 
@@ -1185,8 +1216,10 @@ function snapshotCurrent() {
       };
   if (colorRuleActive()) {
     base.color = cloneColorState(state.color);
-    base.prevColorAlive = state.prevColorAlive ? new Uint8Array(state.prevColorAlive) : null;
   }
+  // Always snapshot holes so step-back restores them too (deaths-create-holes
+  // can grow the hole set over time).
+  base.holes = new Uint8Array(state.holes);
   return base;
 }
 
@@ -1206,11 +1239,12 @@ function restoreSnapshot(snap) {
   }
   if (ok && snap.color && snap.color.hue.length === state.color.hue.length) {
     state.color = cloneColorState(snap.color);
-    state.prevColorAlive = snap.prevColorAlive ? new Uint8Array(snap.prevColorAlive) : null;
   } else if (ok && colorRuleActive()) {
     // Snapshot predates color rule activation — re-seed alive cells.
     seedColorsForAllAlive();
-    state.prevColorAlive = null;
+  }
+  if (ok && snap.holes && snap.holes.length === state.holes.length) {
+    state.holes = new Uint8Array(snap.holes);
   }
   return ok;
 }
@@ -1223,7 +1257,6 @@ function captureGenZero() {
 function clearPrevState() {
   state.prevGrid = null;
   state.prevTilingStates = null;
-  state.prevColorAlive = null;
 }
 
 function randomizeState() {
@@ -1249,9 +1282,10 @@ function clearState() {
     state.grid = makeGrid(state.rows, state.cols, 0);
   }
   // Clearing wipes color state too (per spec: clear resets all cell color
-  // state but not the ruleset choice). Fredkin's prev-generation tracking is
-  // cleared too.
+  // state but not the ruleset choice). Holes and Fredkin's prev-generation
+  // tracking are cleared too.
   clearColorState(state.color);
+  clearHoles();
   state.selection = null;
   clearPrevState();
   captureGenZero();
@@ -1299,7 +1333,7 @@ function inverseFredkinStep() {
   if (isTiling()) {
     const cur = state.tilingStates;
     const prevArr = state.prevTilingStates || new Array(cur.length).fill(0);
-    const conwayOfPrev = stepTiling(prevArr, state.tilingNeighbors);
+    const conwayOfPrev = stepTiling(prevArr, state.tilingNeighbors, state.holes);
     const newPrev = conwayOfPrev.map((v, i) => v ^ cur[i]);
     state.tilingStates = prevArr.slice();
     state.prevTilingStates = newPrev;
@@ -1307,22 +1341,61 @@ function inverseFredkinStep() {
     const cur = state.grid;
     const prevArr = state.prevGrid || makeGrid(state.rows, state.cols, 0);
     const conwayOfPrev = state.gridType === "triangle"
-      ? stepGridTri(prevArr, state.wrap)
-      : stepGrid(prevArr, state.wrap);
+      ? stepGridTri(prevArr, state.wrap, state.holes)
+      : stepGrid(prevArr, state.wrap, state.holes);
     const newPrev = conwayOfPrev.map((row, r) => row.map((v, c) => v ^ cur[r][c]));
     state.grid = prevArr.map((row) => row.slice());
     state.prevGrid = newPrev;
   }
 }
 
+// Re-color living cells after a Fredkin step drives life/death, so an active
+// color rule still "decorates" the board. Survivors keep their hue (rotating
+// it under the rotation rule); newborns take the circular-mean hue of the
+// neighbors that were alive a step ago, or a default seed hue if none.
+function decorateColorsAfterFredkin(aliveBefore) {
+  const n = cellCount();
+  const aliveAfter = flatAlive();
+  const neighborsOf = neighborsOfFn();
+  const rotating = state.colorSettings.rule === RULESETS.ROTATION;
+  const next = makeColorState(n);
+  for (let i = 0; i < n; i += 1) {
+    if (!aliveAfter[i]) continue; // dead cells stay cleared
+    if (aliveBefore[i]) {
+      const hue = rotating
+        ? wrapHue(state.color.hue[i] + state.colorSettings.rotationDelta)
+        : state.color.hue[i];
+      next.hue[i] = hue;
+      next.sat[i] = 1.0;
+      next.age[i] = Math.min(65535, state.color.age[i] + 1);
+      next.origSat[i] = 1.0;
+    } else {
+      const hues = [];
+      const nbrs = neighborsOf(i);
+      for (let k = 0; k < nbrs.length; k += 1) {
+        if (aliveBefore[nbrs[k]]) hues.push(state.color.hue[nbrs[k]]);
+      }
+      const mean = circularMean(hues);
+      const hue = mean == null ? defaultSeedHue() : mean;
+      next.hue[i] = wrapHue(hue);
+      next.sat[i] = 1.0;
+      next.age[i] = 0;
+      next.origSat[i] = 1.0;
+    }
+  }
+  state.color = next;
+}
+
 function stepBack() {
-  if (state.secondOrder && !colorRuleActive()) {
-    // Reversible: apply the inverse rule and ignore history. This keeps
-    // edits intact and lets us run backward past gen 0. Only valid for the
-    // plain rule — a color rule's own state (saturation decay, hue) isn't
-    // recoverable from the alive/dead bits alone, so that case falls through
-    // to the normal history-snapshot undo below.
+  if (state.secondOrder) {
+    // Reversible: apply the inverse rule and ignore history. This keeps edits
+    // intact and lets us run backward past gen 0. Fredkin drives life/death, so
+    // this works with a color rule too — we just re-decorate the reconstructed
+    // generation afterward (exact hues/saturation aren't recoverable, but the
+    // alive/dead layer is).
+    const beforeAlive = colorRuleActive() ? flatAlive() : null;
     inverseFredkinStep();
+    if (beforeAlive) decorateColorsAfterFredkin(beforeAlive);
     state.generation -= 1;
     // History snapshots are tied to the forward timeline; diverging from it
     // via the inverse rule makes them stale for Back-from-here.
@@ -1478,6 +1551,14 @@ function resizeColorState() {
   state.color = makeColorState(cellCount());
 }
 
+function resizeHoles() {
+  state.holes = new Uint8Array(cellCount());
+}
+
+function clearHoles() {
+  state.holes.fill(0);
+}
+
 // Seed color for a newly-alive cell at index i, given current settings.
 // Used for clicks, randomize, image-without-pixel-hue, etc.
 function seedColorAt(i, hue, saturation = 1.0) {
@@ -1516,7 +1597,37 @@ function stepOnce() {
   if (state.history.length > HISTORY_LIMIT) {
     state.history.shift();
   }
-  if (colorRuleActive()) {
+  // Snapshot prev-alive flat for deathsCreateHoles tracking.
+  const prevFlat = state.colorSettings.deathsCreateHoles ? flatAlive() : null;
+
+  // Track the previous generation continuously (regardless of the Fredkin
+  // flag), so toggling Fredkin on mid-run immediately has a valid prior
+  // generation to XOR against and to reverse from.
+  const prevTilingCopy = isTiling() ? state.tilingStates.slice() : null;
+  const prevGridCopy = !isTiling() ? state.grid.map((row) => row.slice()) : null;
+
+  if (state.secondOrder) {
+    // Fredkin drives life/death on the plain Conway layer (exactly like the
+    // base rule), independent of any color rule. Next = Conway(cur) XOR prev.
+    const aliveBefore = colorRuleActive() ? flatAlive() : null;
+    if (isTiling()) {
+      const nextStd = stepTiling(state.tilingStates, state.tilingNeighbors, state.holes);
+      const prev = state.prevTilingStates;
+      state.tilingStates = (prev && prev.length === nextStd.length)
+        ? nextStd.map((v, i) => v ^ prev[i])
+        : nextStd;
+    } else {
+      const nextStd = state.gridType === "triangle"
+        ? stepGridTri(state.grid, state.wrap, state.holes)
+        : stepGrid(state.grid, state.wrap, state.holes);
+      const prev = state.prevGrid;
+      state.grid = (prev && prev.length === nextStd.length && prev[0].length === nextStd[0].length)
+        ? nextStd.map((row, r) => row.map((v, c) => v ^ prev[r][c]))
+        : nextStd;
+    }
+    // Color rule (if any) only decorates the living cells.
+    if (aliveBefore) decorateColorsAfterFredkin(aliveBefore);
+  } else if (colorRuleActive()) {
     const alive = flatAlive();
     const { nextAlive, nextColor } = stepColor(
       alive,
@@ -1524,51 +1635,25 @@ function stepOnce() {
       neighborsOfFn(),
       cellCount(),
       state.colorSettings,
+      state.holes,
     );
-    // Fredkin (2nd-order reversible): flip any cell that was alive one
-    // generation ago, XOR-style, and reconcile its color bookkeeping since
-    // the flip may disagree with what the color rule itself predicted.
-    const prevColorAlive = state.prevColorAlive;
-    if (state.secondOrder && prevColorAlive && prevColorAlive.length === nextAlive.length) {
-      for (let i = 0; i < nextAlive.length; i += 1) {
-        if (!prevColorAlive[i]) continue;
-        nextAlive[i] ^= 1;
-        if (nextAlive[i]) {
-          setCellColor(nextColor, i, defaultSeedHue(), 1.0);
-        } else {
-          clearCellColor(nextColor, i);
-        }
-      }
-    }
-    if (state.secondOrder) state.prevColorAlive = alive;
     applyFlatAlive(nextAlive);
     state.color = nextColor;
   } else if (isTiling()) {
-    const nextStd = stepTiling(state.tilingStates, state.tilingNeighbors);
-    const currentCopy = state.tilingStates.slice();
-    let next = nextStd;
-    if (state.secondOrder) {
-      const prev = state.prevTilingStates;
-      if (prev && prev.length === nextStd.length) {
-        next = nextStd.map((v, i) => v ^ prev[i]);
-      }
-    }
-    state.prevTilingStates = currentCopy;
-    state.tilingStates = next;
+    state.tilingStates = stepTiling(state.tilingStates, state.tilingNeighbors, state.holes);
+  } else if (state.gridType === "triangle") {
+    state.grid = stepGridTri(state.grid, state.wrap, state.holes);
   } else {
-    const nextStd = state.gridType === "triangle"
-      ? stepGridTri(state.grid, state.wrap)
-      : stepGrid(state.grid, state.wrap);
-    const currentCopy = state.grid.map((row) => row.slice());
-    let next = nextStd;
-    if (state.secondOrder) {
-      const prev = state.prevGrid;
-      if (prev && prev.length === nextStd.length && prev[0].length === nextStd[0].length) {
-        next = nextStd.map((row, r) => row.map((v, c) => v ^ prev[r][c]));
-      }
+    state.grid = stepGrid(state.grid, state.wrap, state.holes);
+  }
+  state.prevTilingStates = prevTilingCopy;
+  state.prevGrid = prevGridCopy;
+  // Apply deathsCreateHoles after the step.
+  if (prevFlat) {
+    const nextFlat = flatAlive();
+    for (let i = 0; i < prevFlat.length; i += 1) {
+      if (prevFlat[i] && !nextFlat[i]) state.holes[i] = 1;
     }
-    state.prevGrid = currentCopy;
-    state.grid = next;
   }
   state.generation += 1;
   syncLabels();
@@ -1626,22 +1711,22 @@ function tilingMetrics(width, height) {
 }
 
 function isLightTheme() {
-  return window.matchMedia("(prefers-color-scheme: light)").matches;
+  // Lo-fi aesthetic: always black-on-white, regardless of OS theme.
+  return true;
 }
 
 function themeCanvas() {
-  const light = isLightTheme();
   return {
-    canvasBg: light ? "#eceff4" : "#08121b",
-    squareDead: light ? "#dbe2ec" : "#122033",
-    gridStroke: light ? "rgba(30, 46, 66, 0.08)" : "rgba(181, 214, 255, 0.09)",
-    tilingStroke: light ? "rgba(30, 46, 66, 0.18)" : "rgba(205, 223, 245, 0.14)",
+    canvasBg: "#ffffff",
+    squareDead: "#f2f2f2",
+    gridStroke: "rgba(0, 0, 0, 0.10)",
+    tilingStroke: "rgba(0, 0, 0, 0.30)",
+    wall: "#000000",
   };
 }
 
 function gridColors() {
-  const light = isLightTheme();
-  const dead = light ? "#dbe2ec" : "#1b1e25";
+  const dead = "#f2f2f2";
   if (state.gridType === "rhombus") {
     return { alive: ["#b9b6cb", "#7a7b94", "#4a4c61"], dead };
   }
@@ -1679,6 +1764,24 @@ function liveFillFor(i, fallbackHex) {
   return hslCss(h, safeS, state.colorSettings.lightness);
 }
 
+// Returns the fill color for any cell at flat index `i`. Decides between
+// hole / live / ghost / dead automatically.
+function cellFillFor(i, isAlive, theme, fallbackAliveHex, fallbackDeadHex) {
+  if (state.holes[i]) return theme.wall;
+  if (isAlive) return liveFillFor(i, fallbackAliveHex);
+  // Dead cell — render fading ghost if any.
+  if (colorRuleActive() && state.color.ghostFade && state.color.ghostFade[i] > 0) {
+    let h = state.color.ghostHue[i];
+    if (state.colorsSwapped) h = wrapHue(h + 180);
+    const startSat = state.color.ghostStartSat[i];
+    const total = state.color.ghostStart[i] || 1;
+    const remaining = state.color.ghostFade[i];
+    const sat = Math.max(0, Math.min(1, startSat * (remaining / total)));
+    return hslCss(h, sat, state.colorSettings.lightness);
+  }
+  return fallbackDeadHex;
+}
+
 function drawSquareGrid(width, height) {
   const theme = themeCanvas();
   const { cell, ox, oy } = squareMetrics(width, height);
@@ -1688,8 +1791,9 @@ function drawSquareGrid(width, height) {
   ctx.fillRect(0, 0, width, height);
   for (let r = 0; r < state.rows; r += 1) {
     for (let c = 0; c < state.cols; c += 1) {
+      const idx = r * state.cols + c;
       const alive = state.grid[r][c] === 1;
-      ctx.fillStyle = alive ? liveFillFor(r * state.cols + c, aliveDefault) : dead;
+      ctx.fillStyle = cellFillFor(idx, alive, theme, aliveDefault, dead);
       ctx.fillRect(ox + c * cell, oy + r * cell, cell, cell);
       if (cell > 6) {
         ctx.strokeStyle = theme.gridStroke;
@@ -1714,8 +1818,9 @@ function drawTriangleGrid(width, height) {
       ctx.lineTo(points[1][0], points[1][1]);
       ctx.lineTo(points[2][0], points[2][1]);
       ctx.closePath();
+      const idx = r * state.cols + c;
       const alive = state.grid[r][c] === 1;
-      ctx.fillStyle = alive ? liveFillFor(r * state.cols + c, aliveDefault) : dead;
+      ctx.fillStyle = cellFillFor(idx, alive, theme, aliveDefault, dead);
       ctx.fill();
       ctx.strokeStyle = theme.gridStroke;
       ctx.stroke();
@@ -1745,9 +1850,11 @@ function drawTiling(width, height) {
     const aliveColor = palette.alive[face];
     const isAlive = state.tilingStates[index] === 1;
     let fill;
-    if (colorRuleActive()) {
-      // Color rules drive alive fill; dead cells stay on the theme dead color.
-      fill = isAlive ? liveFillFor(index, aliveColor) : palette.dead;
+    if (state.holes[index]) {
+      fill = theme.wall;
+    } else if (colorRuleActive()) {
+      // Color rules drive alive fill; dead cells get ghost or dead color.
+      fill = cellFillFor(index, isAlive, theme, aliveColor, palette.dead);
     } else if (state.colorsSwapped) {
       fill = isAlive ? palette.dead : aliveColor;
     } else {
@@ -1919,14 +2026,20 @@ function drawPasteGhost(width, height) {
   ctx.restore();
 }
 
+// Zero-padded, visitor-counter-style number (handles Fredkin's negative gens).
+function counterText(n, width = 5) {
+  const sign = n < 0 ? "-" : "";
+  return sign + String(Math.abs(n)).padStart(width - sign.length, "0");
+}
+
 function syncLabels() {
-  elements.generationValue.textContent = String(state.generation);
-  elements.populationValue.textContent = String(population());
-  elements.cellsValue.textContent = String(cellCount());
+  elements.generationValue.textContent = counterText(state.generation);
+  elements.populationValue.textContent = counterText(population());
+  elements.cellsValue.textContent = counterText(cellCount());
   elements.speedValue.textContent = String(state.speed);
   elements.densityValue.textContent = `${Math.round(state.density * 100)}%`;
   elements.thresholdValue.textContent = String(state.threshold);
-  elements.stepBack.disabled = !(state.secondOrder && !colorRuleActive()) && state.history.length === 0;
+  elements.stepBack.disabled = !state.secondOrder && state.history.length === 0;
   elements.resetGenZero.disabled = state.generation === 0 || !state.gen0Snapshot;
   elements.swapColors.classList.toggle("active", state.colorsSwapped);
   syncVoronoiUI();
@@ -1961,23 +2074,34 @@ function syncColorUI() {
   elements.rotationFixedHueField.hidden = state.colorSettings.rotationHueStart !== "fixed";
   elements.rotationFixedHue.value = hueToHex(state.colorSettings.rotationFixedHue);
   elements.rotationDelta.value = String(state.colorSettings.rotationDelta);
+  elements.deathFadeSteps.value = String(state.colorSettings.deathFadeSteps);
+  elements.freezeHueDying.checked = !!state.colorSettings.freezeHueDying;
+  elements.ghostFadeSteps.value = String(state.colorSettings.ghostFadeSteps);
+  elements.blockGhostBirths.checked = !!state.colorSettings.blockGhostBirths;
+  elements.deathsCreateHoles.checked = !!state.colorSettings.deathsCreateHoles;
 }
 
 function syncToolsUI() {
   if (!elements.toolsOptions) return;
   elements.toolsOptions.hidden = !state.toolsPanelOpen;
   elements.toggleToolsPanel.classList.toggle("active", state.toolsPanelOpen);
-  elements.toolPencil.classList.toggle("active", state.tool === "pencil");
-  elements.toolEraser.classList.toggle("active", state.tool === "eraser");
+  elements.toolBrush.classList.toggle("active", state.tool === "brush");
+  elements.toolHole.classList.toggle("active", state.tool === "hole");
   elements.toolSelect.classList.toggle("active", state.tool === "select");
+  elements.brushSize.value = String(state.brushSize);
+  elements.brushSizeValue.textContent = String(state.brushSize);
   const hasSelection = state.selection instanceof Set && state.selection.size > 0;
   elements.toolCopy.disabled = !hasSelection;
   elements.toolCut.disabled = !hasSelection;
   elements.toolPaste.disabled = !state.clipboard;
+  // Paint-color picker only matters when a color rule is active.
+  if (elements.paintColorField) {
+    elements.paintColorField.hidden = !colorRuleActive();
+  }
   // Update canvas cursor class
   canvas.classList.toggle("tool-select", state.tool === "select");
-  canvas.classList.toggle("tool-eraser", state.tool === "eraser");
   canvas.classList.toggle("tool-paste", state.tool === "paste");
+  canvas.classList.toggle("tool-hole", state.tool === "hole");
 }
 
 function setColorRule(rule) {
@@ -1996,6 +2120,7 @@ function setColorRule(rule) {
   state.gen0Snapshot = snapshotCurrent();
   syncLabels();
   syncColorUI();
+  syncToolsUI();
 }
 
 function pointerPosition(event) {
@@ -2421,16 +2546,31 @@ function handlePointerDown(event) {
   }
   if (state.tool === "paste") {
     applyPasteAtPointer(pos);
-    state.tool = "pencil";
+    state.tool = "brush";
     syncToolsUI();
     return;
   }
-  // pencil or eraser
+  if (state.tool === "hole") {
+    // Hole tool — first cell's current hole state (inverted) becomes
+    // the value applied for the rest of the drag.
+    const target = cellAtPointer(pos);
+    if (target == null) return;
+    const flat = flatIndexOf(target);
+    pointerState.painting = true;
+    pointerState.holeDrag = true;
+    pointerState.drawValue = state.holes[flat] ? 0 : 1;
+    holeAtPointer(pos, pointerState.drawValue);
+    return;
+  }
+  // brush — tap-to-toggle: first cell's current state (inverted) becomes
+  // the value painted for the rest of the drag.
   const target = cellAtPointer(pos);
   if (target == null) return;
+  const flat = flatIndexOf(target);
   pointerState.painting = true;
-  pointerState.drawValue = state.tool === "eraser" ? 0 : 1;
-  applyPaint(target, pointerState.drawValue);
+  pointerState.holeDrag = false;
+  pointerState.drawValue = isAliveAt(flat) ? 0 : 1;
+  brushAtPointer(pos, pointerState.drawValue);
 }
 
 function handlePointerMove(event) {
@@ -2445,7 +2585,153 @@ function handlePointerMove(event) {
     return;
   }
   if (!pointerState.painting) return;
-  applyPaint(cellAtPointer(pos), pointerState.drawValue);
+  if (pointerState.holeDrag) {
+    holeAtPointer(pos, pointerState.drawValue);
+  } else {
+    brushAtPointer(pos, pointerState.drawValue);
+  }
+}
+
+// Apply the current brush at the given screen position. brushSize=1 paints
+// only the cell under the cursor (preserving the original 1-cell behavior).
+// Larger sizes paint a disc of cells of that diameter (in cell-units), found
+// by checking each candidate cell's centroid against the cursor in screen
+// coordinates and converting through the geometry's natural cell scale.
+function brushAtPointer(pos, value) {
+  const target = cellAtPointer(pos);
+  if (target == null) return;
+  // Brush paints with the user's paint color when a rule is active.
+  const hue = colorRuleActive() ? state.paintHue : null;
+  if (state.brushSize <= 1) {
+    const flat = flatIndexOf(target);
+    if (state.holes[flat]) return;
+    applyPaint(target, value, hue);
+    return;
+  }
+  const indices = brushCellIndices(pos);
+  for (const idx of indices) {
+    if (state.holes[idx]) continue;
+    if (isAliveAt(idx) !== !!value) {
+      applyPaintFlat(idx, value, hue);
+    }
+  }
+  if (state.generation === 0) {
+    state.gen0Snapshot = snapshotCurrent();
+    state.history = [];
+  }
+  syncLabels();
+}
+
+// Apply hole-toggle at the given screen position with the brush size.
+// Setting a hole also kills any live cell at that index and clears its color
+// state. Removing a hole leaves the cell dead.
+function holeAtPointer(pos, value) {
+  const target = cellAtPointer(pos);
+  if (target == null) return;
+  const baseFlat = flatIndexOf(target);
+  const indices = state.brushSize <= 1 ? [baseFlat] : brushCellIndices(pos);
+  for (const idx of indices) {
+    if (state.holes[idx] === value) continue;
+    state.holes[idx] = value;
+    if (value) {
+      // Becoming a hole — clear cell + color so the spot is truly empty.
+      setAliveAt(idx, 0);
+      if (state.color && state.color.hue) clearCellColor(state.color, idx);
+    }
+  }
+  if (state.generation === 0) {
+    state.gen0Snapshot = snapshotCurrent();
+    state.history = [];
+  }
+  syncLabels();
+}
+
+// Centralized "set cell + seed/clear color" so brush + paint share a path.
+// `applyPaint` keeps its own gen-0 snapshot bookkeeping for single-cell calls.
+function applyPaintFlat(flat, value, hueOverride = null) {
+  setAliveAt(flat, value);
+  if (colorRuleActive()) {
+    if (value) {
+      const hue = hueOverride != null ? hueOverride : defaultSeedHue();
+      seedColorAt(flat, hue, 1.0);
+    } else {
+      clearCellColor(state.color, flat);
+    }
+  }
+}
+
+// Returns the set of flat cell indices covered by the current brush stroke
+// at screen position `pos`. The brush is a disc of diameter `state.brushSize`
+// in cell-units, where "cell-unit" is the natural cell size of the active
+// geometry (cellSize for square; cellW for triangle; an estimate from the
+// average polygon area for tilings).
+function brushCellIndices(pos) {
+  const rect = canvas.getBoundingClientRect();
+  const out = new Set();
+  const radiusCells = state.brushSize / 2;
+
+  if (isTiling()) {
+    const metrics = tilingMetrics(rect.width, rect.height);
+    // Estimate average cell "radius" in world units from total bbox area / count.
+    const [bw, bh] = state.tilingBBox;
+    const avgArea = (bw * bh) / Math.max(1, state.polygons.length);
+    const cellWorldRadius = Math.sqrt(avgArea) * 0.6;
+    const radius = radiusCells * cellWorldRadius * metrics.scale;
+    const r2 = radius * radius;
+    state.polygons.forEach((poly, idx) => {
+      const [cx, cy] = polygonCentroid(poly);
+      const sx = metrics.ox + cx * metrics.scale;
+      const sy = metrics.oy + cy * metrics.scale;
+      const dx = sx - pos.x;
+      const dy = sy - pos.y;
+      if (dx * dx + dy * dy <= r2) out.add(idx);
+    });
+    return out;
+  }
+
+  if (state.gridType === "triangle") {
+    const metrics = triMetrics(rect.width, rect.height);
+    const radius = radiusCells * metrics.cellW;
+    const r2 = radius * radius;
+    // Bound the candidate range by approximate row/col window to avoid
+    // scanning the whole grid.
+    const approxR = clamp(Math.floor((pos.y - metrics.oy) / metrics.cellH), 0, state.rows - 1);
+    const approxC = clamp(Math.floor((pos.x - metrics.ox) / (metrics.cellW / 2)), 0, state.cols - 1);
+    const span = Math.max(2, state.brushSize + 2);
+    for (let r = Math.max(0, approxR - span); r <= Math.min(state.rows - 1, approxR + span); r += 1) {
+      for (let c = Math.max(0, approxC - span * 2); c <= Math.min(state.cols - 1, approxC + span * 2); c += 1) {
+        const points = triCellPoints(r, c, metrics);
+        const cx = (points[0][0] + points[1][0] + points[2][0]) / 3;
+        const cy = (points[0][1] + points[1][1] + points[2][1]) / 3;
+        const dx = cx - pos.x;
+        const dy = cy - pos.y;
+        if (dx * dx + dy * dy <= r2) out.add(r * state.cols + c);
+      }
+    }
+    return out;
+  }
+
+  // square
+  const { cell, ox, oy } = squareMetrics(rect.width, rect.height);
+  const radius = radiusCells * cell;
+  const r2 = radius * radius;
+  const cCenter = (pos.x - ox) / cell;
+  const rCenter = (pos.y - oy) / cell;
+  const span = Math.ceil(radiusCells) + 1;
+  const cMin = Math.max(0, Math.floor(cCenter - span));
+  const cMax = Math.min(state.cols - 1, Math.ceil(cCenter + span));
+  const rMin = Math.max(0, Math.floor(rCenter - span));
+  const rMax = Math.min(state.rows - 1, Math.ceil(rCenter + span));
+  for (let r = rMin; r <= rMax; r += 1) {
+    for (let c = cMin; c <= cMax; c += 1) {
+      const cx = ox + (c + 0.5) * cell;
+      const cy = oy + (r + 0.5) * cell;
+      const dx = cx - pos.x;
+      const dy = cy - pos.y;
+      if (dx * dx + dy * dy <= r2) out.add(r * state.cols + c);
+    }
+  }
+  return out;
 }
 
 function stopPainting() {
@@ -2455,6 +2741,7 @@ function stopPainting() {
     state.selectionDrag = null;
   }
   pointerState.painting = false;
+  pointerState.holeDrag = false;
 }
 
 // ─── Selection / clipboard ─────────────────────────────────────────────────
@@ -2508,23 +2795,31 @@ function finalizeSelection() {
   syncToolsUI();
 }
 
-// Snapshot the selection into the clipboard. If `cut`, also erase those cells.
+// Snapshot the *live* cells inside the selection into the clipboard.
+// Dead cells in the selected rectangle are ignored — pasting won't kill
+// existing cells under the stamp; it only stamps the live shape.
+// If `cut`, the live cells inside the selection are also erased.
 function copySelection(cut) {
   if (!state.selection || state.selection.size === 0) return;
+  // Filter to just the alive members of the selection.
+  const liveIdxs = [];
+  state.selection.forEach((idx) => {
+    if (isAliveAt(idx)) liveIdxs.push(idx);
+  });
+  if (liveIdxs.length === 0) {
+    // Nothing live to copy — clear clipboard so paste stays disabled.
+    state.clipboard = null;
+    syncToolsUI();
+    return;
+  }
   const items = [];
   const useColor = colorRuleActive();
   if (isTiling()) {
-    const cxs = [];
-    const cys = [];
-    state.selection.forEach((idx) => {
-      const [cx, cy] = polygonCentroid(state.polygons[idx]);
-      cxs.push(cx);
-      cys.push(cy);
-    });
-    const ox = Math.min(...cxs);
-    const oy = Math.min(...cys);
-    state.selection.forEach((idx) => {
-      const [cx, cy] = polygonCentroid(state.polygons[idx]);
+    const centroids = liveIdxs.map((idx) => polygonCentroid(state.polygons[idx]));
+    const ox = Math.min(...centroids.map((p) => p[0]));
+    const oy = Math.min(...centroids.map((p) => p[1]));
+    liveIdxs.forEach((idx, k) => {
+      const [cx, cy] = centroids[k];
       const item = { dx: cx - ox, dy: cy - oy };
       if (useColor) {
         item.hue = state.color.hue[idx];
@@ -2536,18 +2831,12 @@ function copySelection(cut) {
     });
     state.clipboard = { kind: "tiling", items };
   } else {
-    const rs = [];
-    const cs = [];
-    state.selection.forEach((idx) => {
-      rs.push(Math.floor(idx / state.cols));
-      cs.push(idx - Math.floor(idx / state.cols) * state.cols);
-    });
+    const rs = liveIdxs.map((idx) => Math.floor(idx / state.cols));
+    const cs = liveIdxs.map((idx, k) => idx - rs[k] * state.cols);
     const r0 = Math.min(...rs);
     const c0 = Math.min(...cs);
-    state.selection.forEach((idx) => {
-      const r = Math.floor(idx / state.cols);
-      const c = idx - r * state.cols;
-      const item = { dr: r - r0, dc: c - c0 };
+    liveIdxs.forEach((idx, k) => {
+      const item = { dr: rs[k] - r0, dc: cs[k] - c0 };
       if (useColor) {
         item.hue = state.color.hue[idx];
         item.sat = state.color.sat[idx];
@@ -2559,7 +2848,7 @@ function copySelection(cut) {
     state.clipboard = { kind: "grid", items };
   }
   if (cut) {
-    state.selection.forEach((idx) => {
+    liveIdxs.forEach((idx) => {
       setAliveAt(idx, 0);
       if (useColor) clearCellColor(state.color, idx);
     });
@@ -2789,15 +3078,42 @@ function bindEvents() {
     state.colorSettings.rotationDelta = val;
     elements.rotationDelta.value = String(val);
   });
+  elements.deathFadeSteps.addEventListener("change", (event) => {
+    const val = clamp(Math.floor(Number(event.target.value) || 0), 0, 20);
+    state.colorSettings.deathFadeSteps = val;
+    elements.deathFadeSteps.value = String(val);
+  });
+  elements.freezeHueDying.addEventListener("change", (event) => {
+    state.colorSettings.freezeHueDying = !!event.target.checked;
+  });
+  elements.ghostFadeSteps.addEventListener("change", (event) => {
+    const val = clamp(Math.floor(Number(event.target.value) || 0), 0, 30);
+    state.colorSettings.ghostFadeSteps = val;
+    elements.ghostFadeSteps.value = String(val);
+  });
+  elements.blockGhostBirths.addEventListener("change", (event) => {
+    state.colorSettings.blockGhostBirths = !!event.target.checked;
+  });
+  elements.deathsCreateHoles.addEventListener("change", (event) => {
+    state.colorSettings.deathsCreateHoles = !!event.target.checked;
+  });
 
   // ─── Tools panel ────────────────────────────────────────────────────────
   elements.toggleToolsPanel.addEventListener("click", () => {
     state.toolsPanelOpen = !state.toolsPanelOpen;
     syncToolsUI();
   });
-  elements.toolPencil.addEventListener("click", () => { state.tool = "pencil"; syncToolsUI(); });
-  elements.toolEraser.addEventListener("click", () => { state.tool = "eraser"; syncToolsUI(); });
+  elements.toolBrush.addEventListener("click", () => { state.tool = "brush"; syncToolsUI(); });
+  elements.toolHole.addEventListener("click", () => { state.tool = "hole"; syncToolsUI(); });
   elements.toolSelect.addEventListener("click", () => { state.tool = "select"; syncToolsUI(); });
+  elements.brushSize.addEventListener("input", (event) => {
+    state.brushSize = clamp(Number(event.target.value) || 1, 1, 10);
+    elements.brushSizeValue.textContent = String(state.brushSize);
+  });
+  elements.paintColor.addEventListener("input", (event) => {
+    const { h } = hexToHsl(event.target.value);
+    state.paintHue = h;
+  });
   elements.toolCopy.addEventListener("click", () => copySelection(false));
   elements.toolCut.addEventListener("click", () => copySelection(true));
   elements.toolPaste.addEventListener("click", () => {
@@ -2828,6 +3144,9 @@ function init() {
   elements.rotationDelta.value = String(state.colorSettings.rotationDelta);
   elements.colorLightness.value = String(Math.round(state.colorSettings.lightness * 100));
   elements.fredkinToggle.checked = state.secondOrder;
+  elements.brushSize.value = String(state.brushSize);
+  elements.brushSizeValue.textContent = String(state.brushSize);
+  elements.paintColor.value = hueToHex(state.paintHue);
   syncSidebar();
   bindEvents();
   rebuildTopology();
