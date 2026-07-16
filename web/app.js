@@ -1711,41 +1711,42 @@ function tilingMetrics(width, height) {
 }
 
 function isLightTheme() {
-  // Lo-fi aesthetic: always black-on-white, regardless of OS theme.
-  return true;
+  // p.ew.pe/w aesthetic: always dark, regardless of OS theme.
+  return false;
 }
 
+// Site palette (p.ew.pe/w): cyan-led on near-black.
 function themeCanvas() {
   return {
-    canvasBg: "#ffffff",
-    squareDead: "#f2f2f2",
-    gridStroke: "rgba(0, 0, 0, 0.10)",
-    tilingStroke: "rgba(0, 0, 0, 0.30)",
+    canvasBg: "#000000",
+    squareDead: "#0e0220",
+    gridStroke: "rgba(244, 244, 255, 0.07)",
+    tilingStroke: "rgba(244, 244, 255, 0.16)",
     wall: "#000000",
   };
 }
 
 function gridColors() {
-  const dead = "#f2f2f2";
+  const dead = "#0e0220";
   if (state.gridType === "rhombus") {
-    return { alive: ["#b9b6cb", "#7a7b94", "#4a4c61"], dead };
+    return { alive: ["#00f0ff", "#aa55ff", "#007a8a"], dead };
   }
   if (state.gridType === "penrose") {
-    return { alive: ["#5c89b8", "#d7a44d"], dead };
+    return { alive: ["#00f0ff", "#aa55ff"], dead };
   }
   if (state.gridType === "einstein") {
-    return { alive: ["#73b7c9", "#e5b65d", "#cf6f5f", "#8fb46a"], dead };
+    return { alive: ["#00f0ff", "#aa55ff", "#ff2aa0", "#00ff66"], dead };
   }
   if (state.gridType === "trihex") {
-    return { alive: ["#d8a862", "#4fb0b8"], dead };
+    return { alive: ["#00f0ff", "#ffaa00"], dead };
   }
   if (state.gridType === "oct") {
-    return { alive: ["#bad0ef", "#ffb55f"], dead };
+    return { alive: ["#00f0ff", "#aa55ff"], dead };
   }
   if (state.gridType === "voronoi") {
-    return { alive: ["#6be1af", "#d58aef", "#f5c46d"], dead };
+    return { alive: ["#00f0ff", "#00ff66", "#aa55ff"], dead };
   }
-  return { alive: ["#f6d97d"], dead };
+  return { alive: ["#00f0ff"], dead };
 }
 
 // Returns the fill color for a live cell at flat index `i`, honoring the
@@ -1785,8 +1786,8 @@ function cellFillFor(i, isAlive, theme, fallbackAliveHex, fallbackDeadHex) {
 function drawSquareGrid(width, height) {
   const theme = themeCanvas();
   const { cell, ox, oy } = squareMetrics(width, height);
-  const aliveDefault = state.colorsSwapped ? theme.squareDead : "#f4d35e";
-  const dead = state.colorsSwapped && !colorRuleActive() ? "#f4d35e" : theme.squareDead;
+  const aliveDefault = state.colorsSwapped ? theme.squareDead : "#00f0ff";
+  const dead = state.colorsSwapped && !colorRuleActive() ? "#00f0ff" : theme.squareDead;
   ctx.fillStyle = theme.canvasBg;
   ctx.fillRect(0, 0, width, height);
   for (let r = 0; r < state.rows; r += 1) {
@@ -1806,8 +1807,8 @@ function drawSquareGrid(width, height) {
 function drawTriangleGrid(width, height) {
   const theme = themeCanvas();
   const metrics = triMetrics(width, height);
-  const aliveDefault = state.colorsSwapped ? theme.squareDead : "#f4d35e";
-  const dead = state.colorsSwapped && !colorRuleActive() ? "#f4d35e" : theme.squareDead;
+  const aliveDefault = state.colorsSwapped ? theme.squareDead : "#00f0ff";
+  const dead = state.colorsSwapped && !colorRuleActive() ? "#00f0ff" : theme.squareDead;
   ctx.fillStyle = theme.canvasBg;
   ctx.fillRect(0, 0, width, height);
   for (let r = 0; r < state.rows; r += 1) {
@@ -2026,16 +2027,10 @@ function drawPasteGhost(width, height) {
   ctx.restore();
 }
 
-// Zero-padded, visitor-counter-style number (handles Fredkin's negative gens).
-function counterText(n, width = 5) {
-  const sign = n < 0 ? "-" : "";
-  return sign + String(Math.abs(n)).padStart(width - sign.length, "0");
-}
-
 function syncLabels() {
-  elements.generationValue.textContent = counterText(state.generation);
-  elements.populationValue.textContent = counterText(population());
-  elements.cellsValue.textContent = counterText(cellCount());
+  elements.generationValue.textContent = String(state.generation);
+  elements.populationValue.textContent = String(population());
+  elements.cellsValue.textContent = String(cellCount());
   elements.speedValue.textContent = String(state.speed);
   elements.densityValue.textContent = `${Math.round(state.density * 100)}%`;
   elements.thresholdValue.textContent = String(state.threshold);

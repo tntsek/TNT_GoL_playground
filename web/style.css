@@ -1,25 +1,29 @@
-/* ── lo-fi 90s-web aesthetic ─────────────────────────────────────────────────
-   black text / white page / monospace everything.
-   buttons are bracketed [links], no shadows, no rounded corners, no gradients.
-*/
+/* ============================================================
+   tnt game of life — styled to sit on p.ew.pe/w
+   palette + fonts lifted from the site stylesheet
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=VT323&family=JetBrains+Mono:wght@400;700&display=swap');
 
 :root {
-  color-scheme: light;
+  color-scheme: dark;
 
-  --bg: #ffffff;
-  --canvas-bg: #ffffff;
-  --panel: #ffffff;
-  --panel-hover: #f2f2f2;
-  --ink: #000000;
-  --ink-muted: #333333;
-  --ink-soft: #666666;
-  --line: #000000;
-  --line-strong: #000000;
-  --input-bg: #ffffff;
-  --link: #0000ee;
-  --link-visited: #551a8b;
-  --accent: #000000;
-  --accent-ink: #ffffff;
+  --bg:      #07000f;
+  --bg-2:    #0e0220;
+  --fg:      #f4f4ff;
+  --dim:     #8f88a0;
+  --rule:    #2a1444;
+  --rule-hi: #5a2a8a;
+  --amber:   #ffaa00;
+  --magenta: #ff2aa0;
+  --cyan:    #00f0ff;
+  --lime:    #00ff66;
+  --yellow:  #ffee33;
+  --purple:  #aa55ff;
+  --white:   #ffffff;
+
+  --mono: "JetBrains Mono", "IBM Plex Mono", Menlo, monospace;
+  --crt:  "VT323", "Courier New", monospace;
 
   --sidebar-width: 300px;
 }
@@ -35,10 +39,11 @@ body {
 }
 
 body {
-  font-family: "Courier New", Courier, ui-monospace, monospace;
+  font-family: var(--mono);
   font-size: 13px;
-  color: var(--ink);
-  background: var(--bg);
+  line-height: 1.45;
+  color: var(--fg);
+  background: #000;
 }
 
 button,
@@ -59,14 +64,14 @@ select {
   position: relative;
   flex: 1 1 auto;
   min-width: 0;
-  background: var(--canvas-bg);
+  background: #000;
 }
 
 #life-canvas {
   display: block;
   width: 100%;
   height: 100%;
-  background: var(--canvas-bg);
+  background: #000;
 }
 
 /* Floating show-controls button (visible only when sidebar is collapsed) */
@@ -80,29 +85,29 @@ select {
   align-items: center;
   justify-content: center;
   padding: 2px 6px;
-  border: 1px solid var(--ink);
+  border: 1px solid var(--rule-hi);
   border-radius: 0;
-  background: var(--panel);
-  color: var(--ink);
+  background: var(--bg);
+  color: var(--cyan);
   cursor: pointer;
 }
 
 .sidebar-show:hover {
-  background: var(--ink);
-  color: var(--bg);
+  border-color: var(--cyan);
+  color: var(--yellow);
 }
 
 body.sidebar-collapsed .sidebar-show {
   display: inline-flex;
 }
 
-/* Sidebar — flat column */
+/* Sidebar */
 .sidebar {
   flex: 0 0 var(--sidebar-width);
   width: var(--sidebar-width);
   height: 100%;
-  border-left: 1px solid var(--ink);
-  background: var(--panel);
+  border-left: 1px solid var(--rule-hi);
+  background: var(--bg);
   overflow: hidden;
 }
 
@@ -115,31 +120,30 @@ body.sidebar-collapsed .sidebar {
 .sidebar-inner {
   width: var(--sidebar-width);
   height: 100%;
-  padding: 10px 14px 14px;
+  padding: 12px 14px 16px;
   display: flex;
   flex-direction: column;
   gap: 8px;
   overflow-y: auto;
   overflow-x: hidden;
   position: relative;
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule-hi) var(--bg);
 }
 
 .sidebar-top {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   padding-bottom: 8px;
-  border-bottom: 1px dashed var(--ink);
+  border-bottom: 1px solid var(--rule);
 }
 
-.sidebar-title.ascii-banner {
-  margin: 0;
-  font-family: inherit;
-  font-size: 12px;
-  line-height: 1.2;
-  letter-spacing: 0;
-  color: var(--ink);
-  white-space: pre;
+.sidebar-title {
+  font-family: var(--crt);
+  font-size: 24px;
+  line-height: 1;
+  color: var(--cyan);
   user-select: none;
 }
 
@@ -153,16 +157,15 @@ body.sidebar-collapsed .sidebar {
   border: none;
   border-radius: 0;
   background: transparent;
-  color: var(--ink);
+  color: var(--dim);
   cursor: pointer;
 }
 
 .sidebar-hide:hover {
-  background: var(--ink);
-  color: var(--bg);
+  color: var(--yellow);
 }
 
-/* Stats row — visitor-counter style */
+/* Stats row */
 .stats {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -174,27 +177,22 @@ body.sidebar-collapsed .sidebar {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  align-items: center;
 }
 
 .stat span {
   font-size: 11px;
   text-transform: lowercase;
-  color: var(--ink-soft);
+  color: var(--dim);
 }
 
 .stat strong {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
-  color: var(--ink);
-  background: var(--ink);
-  color: var(--bg);
-  padding: 1px 5px;
-  letter-spacing: 0.08em;
+  color: var(--fg);
 }
 
-/* Buttons — bracketed [links], old-web style */
+/* Buttons — bracketed links, cyan like the site nav */
 button {
   border: none;
   border-radius: 0;
@@ -202,59 +200,48 @@ button {
   font-size: 13px;
   font-weight: 400;
   text-transform: lowercase;
-  color: var(--link);
+  color: var(--cyan);
   background: transparent;
   cursor: pointer;
 }
 
 button::before {
   content: "[";
-  color: var(--ink);
+  color: var(--dim);
 }
 
 button::after {
   content: "]";
-  color: var(--ink);
+  color: var(--dim);
 }
 
 button:hover {
+  color: var(--yellow);
   text-decoration: underline;
-}
-
-button:active {
-  color: var(--link-visited);
+  text-decoration-style: dotted;
 }
 
 button.primary {
-  background: transparent;
-  border: none;
-  color: var(--link);
   font-weight: 700;
+  font-size: 15px;
 }
 
-button.primary::before {
-  content: "[*";
-}
-
-button.primary::after {
-  content: "*]";
-}
-
-button.primary:hover {
-  text-decoration: underline;
+button.full {
+  width: 100%;
+  padding: 5px 2px;
 }
 
 /* Tooltip element appended to body by JS */
 #floating-tooltip {
   position: fixed;
   z-index: 9999;
-  max-width: 230px;
+  max-width: 240px;
   padding: 6px 8px;
-  border: 1px solid var(--ink);
+  border: 1px solid var(--rule-hi);
   border-radius: 0;
-  background: #ffffcc;
-  color: var(--ink);
-  font-family: "Courier New", Courier, ui-monospace, monospace;
+  background: var(--bg-2);
+  color: var(--fg);
+  font-family: var(--mono);
   font-size: 11px;
   font-weight: 400;
   line-height: 1.4;
@@ -264,12 +251,6 @@ button.primary:hover {
 
 #floating-tooltip.visible {
   opacity: 1;
-}
-
-button.full {
-  width: 100%;
-  padding: 5px 2px;
-  font-size: 15px;
 }
 
 .button-row {
@@ -292,7 +273,7 @@ button.full {
 .field > span {
   font-size: 11px;
   text-transform: lowercase;
-  color: var(--ink-soft);
+  color: var(--dim);
 }
 
 .field-row {
@@ -317,17 +298,24 @@ input[type="text"],
 select {
   width: 100%;
   min-height: 26px;
-  border: 1px solid var(--ink);
+  border: 1px solid var(--rule);
   border-radius: 0;
   padding: 3px 6px;
-  background: var(--input-bg);
-  color: var(--ink);
+  background: var(--bg-2);
+  color: var(--fg);
+}
+
+input[type="number"]:focus,
+input[type="text"]:focus,
+select:focus {
+  outline: none;
+  border-color: var(--rule-hi);
 }
 
 select {
   appearance: none;
-  background-image: linear-gradient(45deg, transparent 50%, var(--ink) 50%),
-    linear-gradient(-45deg, transparent 50%, var(--ink) 50%);
+  background-image: linear-gradient(45deg, transparent 50%, var(--dim) 50%),
+    linear-gradient(-45deg, transparent 50%, var(--dim) 50%);
   background-position: calc(100% - 13px) 55%, calc(100% - 8px) 55%;
   background-size: 5px 5px;
   background-repeat: no-repeat;
@@ -338,7 +326,7 @@ input[type="checkbox"] {
   width: 13px;
   height: 13px;
   margin: 0;
-  accent-color: var(--ink);
+  accent-color: var(--cyan);
 }
 
 /* Ranges */
@@ -354,14 +342,14 @@ input[type="checkbox"] {
   align-items: baseline;
   font-size: 11px;
   text-transform: lowercase;
-  color: var(--ink-soft);
+  color: var(--dim);
 }
 
 .range > span strong {
   font-size: 12px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
-  color: var(--ink);
+  color: var(--fg);
 }
 
 .info-btn {
@@ -376,31 +364,30 @@ input[type="checkbox"] {
   border: none;
   border-radius: 0;
   background: transparent;
-  color: var(--ink-soft);
+  color: var(--dim);
   font-size: 11px;
   font-weight: 400;
   cursor: help;
-  text-decoration: none;
 }
 
 .info-btn::before {
   content: "(";
-  color: var(--ink-soft);
+  color: var(--rule-hi);
 }
 
 .info-btn::after {
   content: ")";
-  color: var(--ink-soft);
+  color: var(--rule-hi);
 }
 
 .info-btn:hover {
-  color: var(--ink);
+  color: var(--cyan);
   text-decoration: none;
 }
 
 input[type="range"] {
   width: 100%;
-  accent-color: var(--ink);
+  accent-color: var(--cyan);
 }
 
 /* Image I/O */
@@ -419,34 +406,34 @@ input[type="range"] {
 .file-field > span {
   font-size: 11px;
   text-transform: lowercase;
-  color: var(--ink-soft);
+  color: var(--dim);
 }
 
 input[type="file"] {
   width: 100%;
   font-size: 11px;
-  color: var(--ink-muted);
-  border: 1px dashed var(--ink);
+  color: var(--dim);
+  border: 1px solid var(--rule);
   border-radius: 0;
   padding: 4px 5px;
-  background: var(--input-bg);
+  background: var(--bg-2);
 }
 
 input[type="file"]::file-selector-button {
   margin-right: 8px;
-  border: 1px solid var(--ink);
+  border: 1px solid var(--rule-hi);
   border-radius: 0;
   padding: 2px 6px;
   font-family: inherit;
   font-size: 11px;
-  color: var(--ink);
-  background: var(--bg);
+  color: var(--cyan);
+  background: transparent;
   cursor: pointer;
 }
 
 input[type="file"]::file-selector-button:hover {
-  background: var(--ink);
-  color: var(--bg);
+  color: var(--yellow);
+  border-color: var(--cyan);
 }
 
 /* Responsive */
@@ -493,7 +480,7 @@ input[type="file"]::file-selector-button:hover {
   min-width: 0;
   font-size: 11px;
   text-transform: lowercase;
-  color: var(--ink-soft);
+  color: var(--dim);
   cursor: pointer;
 }
 
@@ -506,15 +493,15 @@ input[type="file"]::file-selector-button:hover {
   flex: 0 0 auto;
 }
 
-/* Sub-panels: dashed-border boxes, like <fieldset>s of yore */
+/* Sub-panels */
 .voronoi-options {
   display: flex;
   flex-direction: column;
   gap: 6px;
   padding: 8px;
-  border: 1px dashed var(--ink);
+  border: 1px solid var(--rule);
   border-radius: 0;
-  background: var(--panel);
+  background: var(--bg-2);
 }
 
 .voronoi-options[hidden] {
@@ -523,24 +510,17 @@ input[type="file"]::file-selector-button:hover {
 
 .voronoi-options .section-title {
   font-size: 11px;
-  font-weight: 700;
-  text-transform: lowercase;
-  color: var(--ink);
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--amber);
 }
 
-.voronoi-options .section-title::before {
-  content: "~ ";
-}
-
-.voronoi-options .section-title::after {
-  content: " ~";
-}
-
-/* Segmented buttons: selected = inverted */
+/* Segmented buttons: selected = filled cyan */
 .seg-btn {
   flex: 1;
   background: transparent;
-  color: var(--link);
+  color: var(--cyan);
   border: none;
   border-radius: 0;
   padding: 3px 2px;
@@ -549,25 +529,27 @@ input[type="file"]::file-selector-button:hover {
 }
 
 .seg-btn:hover {
+  color: var(--yellow);
   text-decoration: underline;
+  text-decoration-style: dotted;
 }
 
 .seg-btn.active {
-  background: var(--ink);
-  color: var(--bg);
+  background: var(--cyan);
+  color: #000;
   text-decoration: none;
 }
 
 .seg-btn.active::before,
 .seg-btn.active::after {
-  color: var(--bg);
+  color: #000;
 }
 
 #swap-colors.active,
 #toggle-color-panel.active,
 #toggle-tools-panel.active {
-  background: var(--ink);
-  color: var(--bg);
+  background: var(--cyan);
+  color: #000;
 }
 
 #swap-colors.active::before,
@@ -576,11 +558,11 @@ input[type="file"]::file-selector-button:hover {
 #toggle-color-panel.active::after,
 #toggle-tools-panel.active::before,
 #toggle-tools-panel.active::after {
-  color: var(--bg);
+  color: #000;
 }
 
 button:disabled {
-  color: var(--ink-soft);
+  color: var(--dim);
   opacity: 0.5;
   cursor: not-allowed;
   text-decoration: none;
@@ -592,7 +574,7 @@ button:disabled {
   gap: 4px 6px;
   align-items: center;
   font-size: 11px;
-  color: var(--ink-muted);
+  color: var(--dim);
   padding-top: 2px;
 }
 
@@ -600,16 +582,16 @@ button:disabled {
   width: 12px;
   height: 12px;
   border-radius: 0;
-  border: 1px solid var(--ink);
+  border: 1px solid var(--rule-hi);
 }
 
 input[type="color"] {
   width: 100%;
   min-height: 26px;
-  border: 1px solid var(--ink);
+  border: 1px solid var(--rule);
   border-radius: 0;
   padding: 1px 2px;
-  background: var(--input-bg);
+  background: var(--bg-2);
   cursor: pointer;
 }
 
@@ -621,28 +603,4 @@ canvas#life-canvas.tool-paste {
 }
 canvas#life-canvas.tool-hole {
   cursor: not-allowed;
-}
-
-/* Footer — guestbook sign-off */
-.footer-note {
-  margin-top: auto;
-  padding-top: 10px;
-  border-top: 1px dashed var(--ink);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  align-items: center;
-  font-size: 11px;
-  color: var(--ink-soft);
-  user-select: none;
-}
-
-.blink {
-  animation: blink 1s steps(1) infinite;
-}
-
-@keyframes blink {
-  50% {
-    opacity: 0;
-  }
 }
