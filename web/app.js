@@ -13,7 +13,7 @@ import {
   rgbToHsl,
   hslCss,
   hueToHex,
-} from "./colorRules.js";
+} from "./colorRules.js?v=6";
 
 const PHI = (1 + Math.sqrt(5)) / 2;
 const SQRT2 = Math.sqrt(2);
@@ -136,6 +136,7 @@ const state = {
   tool: "brush", // 'brush' | 'select' | 'paste'
   brushSize: 1, // 1..10 (cells in diameter)
   paintHue: 0, // 0..360 — hue used for brush-painted cells under a color rule
+  paintSat: 1, // 0..1 — 0 makes brush-painted cells achromatic (gray/white/black)
   selection: null, // Set<flatIdx> | null
   selectionDrag: null, // in-progress rectangle in screen coords
   clipboard: null, // see editor-tools commit
@@ -1366,9 +1367,11 @@ function decorateColorsAfterFredkin(aliveBefore) {
         ? wrapHue(state.color.hue[i] + state.colorSettings.rotationDelta)
         : state.color.hue[i];
       next.hue[i] = hue;
-      next.sat[i] = 1.0;
+      // Preserve the cell's own saturation (an achromatic start color should
+      // stay achromatic) rather than forcing full saturation.
+      next.sat[i] = state.color.sat[i];
       next.age[i] = Math.min(65535, state.color.age[i] + 1);
-      next.origSat[i] = 1.0;
+      next.origSat[i] = state.color.origSat[i];
     } else {
       const hues = [];
       const nbrs = neighborsOf(i);
@@ -1377,10 +1380,11 @@ function decorateColorsAfterFredkin(aliveBefore) {
       }
       const mean = circularMean(hues);
       const hue = mean == null ? defaultSeedHue() : mean;
+      const sat = mean == null ? defaultSeedSat() : 1.0;
       next.hue[i] = wrapHue(hue);
-      next.sat[i] = 1.0;
+      next.sat[i] = sat;
       next.age[i] = 0;
-      next.origSat[i] = 1.0;
+      next.origSat[i] = sat;
     }
   }
   state.color = next;
@@ -1573,6 +1577,17 @@ function defaultSeedHue() {
   return Math.random() * 360;
 }
 
+// Companion to defaultSeedHue(): the saturation to pair with it. Honors the
+// user's chosen fixed-start saturation (0 = achromatic gray/white/black,
+// depending on the Lightness setting) so Randomize/Invert/paste don't
+// silently override a deliberately achromatic starting color with full sat.
+function defaultSeedSat() {
+  if (state.colorSettings.rule === RULESETS.ROTATION && state.colorSettings.rotationHueStart === "fixed") {
+    return state.colorSettings.rotationFixedSat ?? 1.0;
+  }
+  return 1.0;
+}
+
 // Re-seed color for every currently-alive cell that lacks color (sat=0).
 // Called on toggling a ruleset on, after randomize, after invert, etc.
 function seedColorsForAllAlive() {
@@ -1580,7 +1595,7 @@ function seedColorsForAllAlive() {
   for (let i = 0; i < n; i += 1) {
     if (isAliveAt(i)) {
       if (state.color.sat[i] <= 0 || state.color.origSat[i] <= 0) {
-        seedColorAt(i, defaultSeedHue(), 1.0);
+        seedColorAt(i, defaultSeedHue(), defaultSeedSat());
       }
     } else {
       clearCellColor(state.color, i);
@@ -1757,12 +1772,11 @@ function liveFillFor(i, fallbackHex) {
     return fallbackHex;
   }
   let h = state.color.hue[i];
-  const s = state.color.sat[i];
+  // Zero saturation is a legitimate achromatic color (gray/white/black,
+  // depending on the Lightness setting) — not a value to paper over.
+  const s = Number.isFinite(state.color.sat[i]) ? state.color.sat[i] : 1.0;
   if (state.colorsSwapped) h = wrapHue(h + 180);
-  // If a cell is alive but somehow has zero saturation (e.g. just before
-  // dying under Goethean), keep it visible at a low floor.
-  const safeS = s > 0 ? s : 1.0;
-  return hslCss(h, safeS, state.colorSettings.lightness);
+  return hslCss(h, s, state.colorSettings.lightness);
 }
 
 // Returns the fill color for any cell at flat index `i`. Decides between
@@ -2067,7 +2081,7 @@ function syncColorUI() {
   elements.rotationHueFixed.classList.toggle("active", state.colorSettings.rotationHueStart === "fixed");
   elements.rotationHueParent.classList.toggle("active", state.colorSettings.rotationHueStart === "parent");
   elements.rotationFixedHueField.hidden = state.colorSettings.rotationHueStart !== "fixed";
-  elements.rotationFixedHue.value = hueToHex(state.colorSettings.rotationFixedHue);
+  elements.rotationFixedHue.value = hueToHex(state.colorSettings.rotationFixedHue, state.colorSettings.rotationFixedSat);
   elements.rotationDelta.value = String(state.colorSettings.rotationDelta);
   elements.deathFadeSteps.value = String(state.colorSettings.deathFadeSteps);
   elements.freezeHueDying.checked = !!state.colorSettings.freezeHueDying;
@@ -2170,7 +2184,7 @@ function cellAtPointer(pos) {
   return null;
 }
 
-function applyPaint(target, value, hueOverride = null) {
+function applyPaint(target, value, hueOverride = null, satOverride = null) {
   if (target == null) {
     return;
   }
@@ -2179,7 +2193,8 @@ function applyPaint(target, value, hueOverride = null) {
   if (colorRuleActive()) {
     if (value) {
       const hue = hueOverride != null ? hueOverride : defaultSeedHue();
-      seedColorAt(flat, hue, 1.0);
+      const sat = satOverride != null ? satOverride : defaultSeedSat();
+      seedColorAt(flat, hue, sat);
     } else {
       clearCellColor(state.color, flat);
     }
@@ -2597,17 +2612,18 @@ function brushAtPointer(pos, value) {
   if (target == null) return;
   // Brush paints with the user's paint color when a rule is active.
   const hue = colorRuleActive() ? state.paintHue : null;
+  const sat = colorRuleActive() ? state.paintSat : null;
   if (state.brushSize <= 1) {
     const flat = flatIndexOf(target);
     if (state.holes[flat]) return;
-    applyPaint(target, value, hue);
+    applyPaint(target, value, hue, sat);
     return;
   }
   const indices = brushCellIndices(pos);
   for (const idx of indices) {
     if (state.holes[idx]) continue;
     if (isAliveAt(idx) !== !!value) {
-      applyPaintFlat(idx, value, hue);
+      applyPaintFlat(idx, value, hue, sat);
     }
   }
   if (state.generation === 0) {
@@ -2643,12 +2659,13 @@ function holeAtPointer(pos, value) {
 
 // Centralized "set cell + seed/clear color" so brush + paint share a path.
 // `applyPaint` keeps its own gen-0 snapshot bookkeeping for single-cell calls.
-function applyPaintFlat(flat, value, hueOverride = null) {
+function applyPaintFlat(flat, value, hueOverride = null, satOverride = null) {
   setAliveAt(flat, value);
   if (colorRuleActive()) {
     if (value) {
       const hue = hueOverride != null ? hueOverride : defaultSeedHue();
-      seedColorAt(flat, hue, 1.0);
+      const sat = satOverride != null ? satOverride : defaultSeedSat();
+      seedColorAt(flat, hue, sat);
     } else {
       clearCellColor(state.color, flat);
     }
@@ -2892,7 +2909,7 @@ function applyPasteAtPointer(pos) {
       if (bestI >= 0) {
         setAliveAt(bestI, 1);
         if (useColor) writeColorFromClip(bestI, item);
-        else if (colorRuleActive()) seedColorAt(bestI, defaultSeedHue(), 1);
+        else if (colorRuleActive()) seedColorAt(bestI, defaultSeedHue(), defaultSeedSat());
       }
     });
   } else if (state.clipboard.kind === "grid" && !isTiling()) {
@@ -3065,8 +3082,9 @@ function bindEvents() {
     syncColorUI();
   });
   elements.rotationFixedHue.addEventListener("input", (event) => {
-    const { h } = hexToHsl(event.target.value);
+    const { h, s } = hexToHsl(event.target.value);
     state.colorSettings.rotationFixedHue = h;
+    state.colorSettings.rotationFixedSat = s;
   });
   elements.rotationDelta.addEventListener("change", (event) => {
     const val = clamp(Number(event.target.value) || 0, -180, 180);
@@ -3106,8 +3124,9 @@ function bindEvents() {
     elements.brushSizeValue.textContent = String(state.brushSize);
   });
   elements.paintColor.addEventListener("input", (event) => {
-    const { h } = hexToHsl(event.target.value);
+    const { h, s } = hexToHsl(event.target.value);
     state.paintHue = h;
+    state.paintSat = s;
   });
   elements.toolCopy.addEventListener("click", () => copySelection(false));
   elements.toolCut.addEventListener("click", () => copySelection(true));
@@ -3135,13 +3154,13 @@ function init() {
   elements.rowsInput.value = String(state.rows);
   elements.colsInput.value = String(state.cols);
   elements.voronoiJitter.value = String(Math.round(state.voronoiJitter * 100));
-  elements.rotationFixedHue.value = hueToHex(state.colorSettings.rotationFixedHue);
+  elements.rotationFixedHue.value = hueToHex(state.colorSettings.rotationFixedHue, state.colorSettings.rotationFixedSat);
   elements.rotationDelta.value = String(state.colorSettings.rotationDelta);
   elements.colorLightness.value = String(Math.round(state.colorSettings.lightness * 100));
   elements.fredkinToggle.checked = state.secondOrder;
   elements.brushSize.value = String(state.brushSize);
   elements.brushSizeValue.textContent = String(state.brushSize);
-  elements.paintColor.value = hueToHex(state.paintHue);
+  elements.paintColor.value = hueToHex(state.paintHue, state.paintSat);
   syncSidebar();
   bindEvents();
   rebuildTopology();

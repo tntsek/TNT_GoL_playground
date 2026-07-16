@@ -37,6 +37,7 @@ export function defaultColorSettings() {
     goetheanSatStart: "full", // 'full' | 'inherit'
     rotationHueStart: "fixed", // 'fixed' | 'parent'
     rotationFixedHue: 0, // degrees
+    rotationFixedSat: 1, // 0..1 — 0 makes the fixed start color achromatic (gray/white/black)
     rotationDelta: 15, // degrees per generation
     lightness: 0.5, // 0..1
     // Death fade. 0 = immediate death (default Conway behavior). N>0 means a
@@ -336,9 +337,12 @@ export function stepColor(alive, color, neighborsOf, n, settings, holes) {
         if (standardSurvive) {
           nextAlive[i] = 1;
           nextColor.hue[i] = wrapHue(color.hue[i] + settings.rotationDelta);
-          nextColor.sat[i] = 1.0;
+          // Preserve the cell's own saturation across generations (rather than
+          // forcing full saturation) so an achromatic (gray/white/black) start
+          // color stays achromatic instead of snapping to a saturated hue.
+          nextColor.sat[i] = color.sat[i];
           nextColor.age[i] = Math.min(65535, color.age[i] + 1);
-          nextColor.origSat[i] = 1.0;
+          nextColor.origSat[i] = color.origSat[i];
         } else if (fadeSteps > 0) {
           if (!applyFade(i, color.hue[i] + settings.rotationDelta, freezeHueDying)) {
             spawnGhost(i, color.hue[i], color.sat[i]);
@@ -348,6 +352,7 @@ export function stepColor(alive, color, neighborsOf, n, settings, holes) {
         }
       } else if (standardBirth) {
         let h;
+        let s;
         if (settings.rotationHueStart === "parent") {
           const liveHues = [];
           for (let k = 0; k < nbrs.length; k += 1) {
@@ -356,14 +361,16 @@ export function stepColor(alive, color, neighborsOf, n, settings, holes) {
           }
           const mean = circularMean(liveHues);
           h = mean == null ? settings.rotationFixedHue : mean;
+          s = 1.0;
         } else {
           h = settings.rotationFixedHue;
+          s = settings.rotationFixedSat ?? 1.0;
         }
         nextAlive[i] = 1;
         nextColor.hue[i] = wrapHue(h);
-        nextColor.sat[i] = 1.0;
+        nextColor.sat[i] = s;
         nextColor.age[i] = 0;
-        nextColor.origSat[i] = 1.0;
+        nextColor.origSat[i] = s;
       }
     }
   }
@@ -411,11 +418,14 @@ export function hslCss(h, s, l) {
   return `hsl(${h.toFixed(1)}, ${(s * 100).toFixed(1)}%, ${(l * 100).toFixed(1)}%)`;
 }
 
-// Convert HSL hue to a 6-digit hex string at full saturation, 50% lightness.
-// Used for the rotation start-hue color picker.
-export function hueToHex(h) {
-  const c = 1;
-  const x = 1 - Math.abs(((h / 60) % 2) - 1);
+// Convert HSL hue (+ optional saturation) to a 6-digit hex string at 50%
+// lightness. Used for the rotation start-hue and paint-color pickers. With
+// s=0 (achromatic), this correctly yields neutral gray (#808080) rather than
+// a saturated color, so picking white/black/gray round-trips faithfully
+// instead of collapsing to a fixed hue.
+export function hueToHex(h, s = 1) {
+  const c = clamp01(s);
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
   let r = 0;
   let g = 0;
   let b = 0;
@@ -430,4 +440,8 @@ export function hueToHex(h) {
   const m = 0.5 - c / 2;
   const toHex = (v) => Math.round((v + m) * 255).toString(16).padStart(2, "0");
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function clamp01(v) {
+  return Math.max(0, Math.min(1, v));
 }
